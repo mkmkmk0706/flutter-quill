@@ -421,7 +421,8 @@ class QuillController extends ChangeNotifier {
     for (var i = 0; i < length; i++) {
       final newIndex = index + i;
       _styleCacheByIndex[newIndex] = document.collectStyle(newIndex, 1);
-      _dbg('[replaceText] retain[$newIndex] savedStyle: ${_styleCacheByIndex[newIndex]}');
+      _dbg(
+          '[replaceText] retain[$newIndex] savedStyle: ${_styleCacheByIndex[newIndex]}');
     }
   }
 
@@ -464,7 +465,8 @@ class QuillController extends ChangeNotifier {
       // isDeleteOnly가 아니어서 cacheStyle이 호출되지 않으므로,
       // 아직 캐시가 없는 위치의 스타일을 document.replace 전에 미리 저장한다.
       for (var i = index; i < index + len; i++) {
-        if (!_styleCacheByIndex.containsKey(i) && !_imePreservedStyles.containsKey(i)) {
+        if (!_styleCacheByIndex.containsKey(i) &&
+            !_imePreservedStyles.containsKey(i)) {
           _styleCacheByIndex[i] = document.collectStyle(i, 1);
         }
       }
@@ -484,7 +486,8 @@ class QuillController extends ChangeNotifier {
 
       final indexStyle = getCachedStyle(index);
 
-      _dbg('[replaceText] styleIndex=$index indexStyle=$indexStyle, $data replace[${delta.toJson()}]');
+      _dbg(
+          '[replaceText] styleIndex=$index indexStyle=$indexStyle, $data replace[${delta.toJson()}]');
 
       // 순수 삽입: [retain, insert] 또는 [insert]
       final isPureInsert = delta.length <= 2 && delta.last.isInsert;
@@ -525,7 +528,8 @@ class QuillController extends ChangeNotifier {
             }
             // 사용자가 OFF한 속성(null값) 중 캐시에 없는 것만 추가 (캐시 값은 덮어쓰지 않음).
             for (final activeAttr in activeStyle.values) {
-              if (activeAttr.value == null && !attrs.containsKey(activeAttr.key)) {
+              if (activeAttr.value == null &&
+                  !attrs.containsKey(activeAttr.key)) {
                 attrs[activeAttr.key] = activeAttr;
               }
             }
@@ -544,7 +548,8 @@ class QuillController extends ChangeNotifier {
           }
         }
 
-        _dbg('[replaceText] retain[$index ~ $number] isEnd:$isEnd activeStyle=$activeStyle');
+        _dbg(
+            '[replaceText] retain[$index ~ $number] isEnd:$isEnd activeStyle=$activeStyle');
 
         // retainDelta가 no-op retain만 포함하면 document.compose 내부 trim() 후
         // delta가 비어 assertion 실패하므로 사전에 체크한다.
@@ -804,7 +809,8 @@ class QuillController extends ChangeNotifier {
         _pendingInlineStyle =
             pendingMap.isNotEmpty ? Style.attr(pendingMap) : null;
         _preserveToggledStyleOnNextSelection = false;
-        _dbg('[replaceText] updateSelection 1:$toggledStyle [insertNewline && selection.start > 0] $insertNewline, ${selection.start}');
+        _dbg(
+            '[replaceText] updateSelection 1:$toggledStyle [insertNewline && selection.start > 0] $insertNewline, ${selection.start}');
       } else if (_preserveToggledStyleOnNextSelection) {
         // 서식 적용 직후 최초 selection 변경(재포커스 탭 등)은 toggledStyle을 보존한다.
         _preserveToggledStyleOnNextSelection = false;
@@ -812,16 +818,19 @@ class QuillController extends ChangeNotifier {
       } else {
         // Android에서 포커스 이벤트가 여러 번 올 때 _pendingInlineStyle로 복원한다.
         toggledStyle = _pendingInlineStyle ?? const Style();
-        _dbg('[replaceText] updateSelection 2:$toggledStyle [!] $insertNewline, ${selection.start}');
+        _dbg(
+            '[replaceText] updateSelection 2:$toggledStyle [!] $insertNewline, ${selection.start}');
       }
     } else {
       if (_preserveToggledStyleOnNextSelection) {
         _preserveToggledStyleOnNextSelection = false;
-        _dbg('[replaceText] updateSelection preserve(noKeepStyle):$toggledStyle');
+        _dbg(
+            '[replaceText] updateSelection preserve(noKeepStyle):$toggledStyle');
       } else {
         // Android에서 포커스 이벤트가 여러 번 올 때 _pendingInlineStyle로 복원한다.
         toggledStyle = _pendingInlineStyle ?? const Style();
-        _dbg('[replaceText] updateSelection 3:$toggledStyle !keepStyleOnNewLine');
+        _dbg(
+            '[replaceText] updateSelection 3:$toggledStyle !keepStyleOnNewLine');
       }
     }
 
@@ -972,7 +981,7 @@ class QuillController extends ChangeNotifier {
 
     if (plainText != null) {
       final plainTextToPaste = await getTextToPaste(plainText);
-      if (await pastePlainTextOrDelta(plainTextToPaste,
+      if (await await pastePlainTextOrDelta(plainTextToPaste,
           pastePlainText: _pastePlainText, pasteDelta: _pasteDelta)) {
         updateEditor?.call();
         return true;
