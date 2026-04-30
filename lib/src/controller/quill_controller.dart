@@ -981,7 +981,7 @@ class QuillController extends ChangeNotifier {
 
     if (plainText != null) {
       final plainTextToPaste = await getTextToPaste(plainText);
-      if (await await pastePlainTextOrDelta(plainTextToPaste,
+      if (await pastePlainTextOrDelta(plainTextToPaste,
           pastePlainText: _pastePlainText, pasteDelta: _pasteDelta)) {
         updateEditor?.call();
         return true;
