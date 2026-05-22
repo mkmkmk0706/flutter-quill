@@ -81,3 +81,5 @@ pubspec.lock
 # FVM
 .fvm/flutter_sdk
 .fvm/versions
+.fvm/release
+.fvm/version
