@@ -1,4 +1,3 @@
-import 'dart:developer';
 import 'dart:ui' show lerpDouble;
 
 import 'package:flutter/cupertino.dart';
@@ -14,12 +13,19 @@ import '../editor.dart';
 import 'raw_editor.dart';
 
 void _dbg(String msg) {
-  if (kDebugMode) log(msg);
+  if (kDebugMode) debugPrint(msg);
 }
 
 mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClient {
   TextInputConnection? _textInputConnection;
   TextEditingValue? __lastKnownRemoteTextEditingValue;
+
+  // updateEditingValue 처리 중임을 나타내는 플래그.
+  // 처리 중에는 _lastKnownRemoteTextEditingValue가 실제 컨트롤러 상태보다
+  // 앞서 있으므로, 중간에 발생하는 updateRemoteValueIfNeeded 호출을 억제한다.
+  // (예: replaceText 내부 notifyListeners → updateRemoteValueIfNeeded가
+  // _updateSelection 실행 전에 sel=old 상태로 spurious send를 일으킬 수 있음)
+  bool _processingIMEEvent = false;
 
   set _lastKnownRemoteTextEditingValue(TextEditingValue? value) {
     __lastKnownRemoteTextEditingValue = value;
@@ -154,6 +160,13 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
     if (!hasConnection) {
       return;
     }
+    // updateEditingValue 처리 중(_processingIMEEvent=true)에는 억제한다.
+    // _lastKnownRemoteTextEditingValue가 incoming value로 먼저 업데이트되지만,
+    // 컨트롤러 상태(document/selection)는 replaceText 완료 전이므로 불일치가 생긴다.
+    // 이 시점의 notifyListeners로 인한 spurious send(sel=old 등)를 차단한다.
+    if (_processingIMEEvent) {
+      return;
+    }
 
     final value = textEditingValue;
 
@@ -172,6 +185,20 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
       return;
     }
 
+    // During active IME composing, skip cursor-only corrections.
+    // Sending setEditingState with composing=(-1,-1) while Samsung is mid-conversion
+    // cancels its candidate selection. If only the selection changed (text is same),
+    // the IME already knows where its cursor is within the composing range.
+    if (composingRange.isValid &&
+        actualValue.text == _lastKnownRemoteTextEditingValue!.text) {
+      _dbg('[IME] updateRemote suppressed: cursor-only change during composing '
+          '(would send sel=${actualValue.selection.baseOffset})');
+      return;
+    }
+
+    _dbg('[IME] → platform (updateRemote): text="${actualValue.text.replaceAll('\n', '↵')}" '
+        'sel=${actualValue.selection.baseOffset}..${actualValue.selection.extentOffset} '
+        'composing=${actualValue.composing}');
     _lastKnownRemoteTextEditingValue = actualValue;
     _textInputConnection!.setEditingState(
       // Set composing to (-1, -1), otherwise an exception will be thrown if
@@ -194,8 +221,15 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
       return;
     }
 
+    _dbg('[IME] ← platform: text="${value.text.replaceAll('\n', '↵')}" '
+        'composing=${value.composing} sel=${value.selection.baseOffset}..${value.selection.extentOffset} '
+        '| prev: text="${_lastKnownRemoteTextEditingValue?.text.replaceAll('\n', '↵')}" '
+        'composing=${_lastKnownRemoteTextEditingValue?.composing} '
+        'sel=${_lastKnownRemoteTextEditingValue?.selection.baseOffset}..'
+        '${_lastKnownRemoteTextEditingValue?.selection.extentOffset}');
+
     if (_lastKnownRemoteTextEditingValue == value) {
-      // There is no difference between this value and the last known value.
+      _dbg('[IME] ← skip: identical');
       return;
     }
 
@@ -208,9 +242,34 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
       // This check fixes an issue on Android when it sends
       // composing updates separately from regular changes for text and
       // selection.
+      _dbg('[IME] ← skip: composing-only change');
       _lastKnownRemoteTextEditingValue = value;
       return;
     }
+
+    // 텍스트가 같고 이전 상태에서 composing이 활성이었던 경우: IME 내부 cursor 재배치 이벤트.
+    // 일본어/삼성 IME는 candidate 목록 표시 전 cursor를 composing 시작 위치로 이동시키는데,
+    // composing을 해제((-1,-1))하면서 sel만 바꾸는 이벤트도 포함된다.
+    //
+    // 이 이벤트를 Quill selection 변경으로 처리하면:
+    //   1) cursor가 글자 앞으로 이동
+    //   2) notifyListeners → updateRemoteValueIfNeeded가 이전 텍스트("かっこ")로
+    //      spurious setEditingState를 전송 → Samsung이 텍스트 변경으로 인식해 전체 삭제 cascade
+    //
+    // stored는 갱신하지 않는다. 갱신하면 actual.sel ≠ stored.sel 불일치가 생겨
+    // updateRemoteValueIfNeeded가 spurious send를 유발한다.
+    if (_lastKnownRemoteTextEditingValue!.text == value.text &&
+        _lastKnownRemoteTextEditingValue!.composing.isValid) {
+      _dbg('[IME] ← skip: IME cursor reposition (text same, prev composing active; '
+          'new composing=${value.composing})');
+      return;
+    }
+
+    // 이후 처리에서 _lastKnownRemoteTextEditingValue를 incoming value로 먼저 업데이트하고
+    // replaceText/forceToggledStyle의 notifyListeners가 중간에 updateRemoteValueIfNeeded를
+    // 호출하더라도 spurious send가 발생하지 않도록 플래그를 세운다.
+    _processingIMEEvent = true;
+    try {
 
     final effectiveLastKnownValue = _lastKnownRemoteTextEditingValue!;
     _lastKnownRemoteTextEditingValue = value;
@@ -222,6 +281,7 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
     final diff = getDiff(oldText, text, cursorPosition);
 
     if (diff.deleted.isEmpty && diff.inserted.isEmpty) {
+      _dbg('[IME] ← selection-only: sel → ${value.selection.baseOffset}..${value.selection.extentOffset}');
       widget.controller.updateSelection(value.selection, ChangeSource.local);
     } else {
       // Android/iOS IME composing 중 toggledStyle 유실 방지:
@@ -255,6 +315,28 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
         // forceToggledStyle만 호출해 다음 IME 이벤트에서 toggledStyle 상태를 유지한다.
         widget.controller.forceToggledStyle(composingStyle);
       }
+
+      // 삼성 등 일부 IME는 변환 확정(wasComposing → composing 해제 + 텍스트 교체) 후에도
+      // 내부적으로 composing 세션을 유지한다. 다음 입력 시 변환 전 소스("か")를 기반으로
+      // 새 composing을 확장하여 "()" 대신 "かか\n" 같은 오동작을 일으킨다.
+      // setEditingState를 명시적으로 전송해 Android IME의 composing span을 해제한다.
+      if (hasConnection &&
+          wasComposing &&
+          !value.composing.isValid &&
+          diff.deleted.isNotEmpty &&
+          diff.inserted.isNotEmpty) {
+        final confirmedValue = textEditingValue.copyWith(
+          composing: const TextRange(start: -1, end: -1),
+        );
+        _dbg('[IME] → platform (force-confirm): text="${confirmedValue.text.replaceAll('\n', '↵')}" '
+            'sel=${confirmedValue.selection.baseOffset}..${confirmedValue.selection.extentOffset}');
+        _lastKnownRemoteTextEditingValue = confirmedValue;
+        _textInputConnection!.setEditingState(confirmedValue);
+      }
+    }
+
+    } finally {
+      _processingIMEEvent = false;
     }
   }
 
@@ -370,6 +452,15 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
   void showAutocorrectionPromptRect(int start, int end) {
     // this is called VERY OFTEN when editing a document, no longer throw
     // an exception
+  }
+
+  @override
+  bool onFocusReceived() {
+    if (mounted && !widget.config.focusNode.hasFocus && widget.config.focusNode.canRequestFocus) {
+      widget.config.focusNode.requestFocus();
+      return true;
+    }
+    return false;
   }
 
   @override

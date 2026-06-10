@@ -43,17 +43,16 @@ class QuillController extends ChangeNotifier {
     this.onSelectionCompleted,
     this.onSelectionChanged,
     this.readOnly = false,
-  })  : _document = document,
-        _selection = selection;
+  }) : _document = document,
+       _selection = selection;
 
   factory QuillController.basic({
     QuillControllerConfig config = const QuillControllerConfig(),
-  }) =>
-      QuillController(
-        config: config,
-        document: Document(),
-        selection: const TextSelection.collapsed(offset: 0),
-      );
+  }) => QuillController(
+    config: config,
+    document: Document(),
+    selection: const TextSelection.collapsed(offset: 0),
+  );
 
   final QuillControllerConfig config;
 
@@ -158,10 +157,8 @@ class QuillController extends ChangeNotifier {
 
   Stream<DocChange> get changes => document.changes;
 
-  TextEditingValue get plainTextEditingValue => TextEditingValue(
-        text: document.toPlainText(),
-        selection: selection,
-      );
+  TextEditingValue get plainTextEditingValue =>
+      TextEditingValue(text: document.toPlainText(), selection: selection);
 
   /// Only attributes applied to all characters within this range are
   /// included in the result.
@@ -209,10 +206,8 @@ class QuillController extends ChangeNotifier {
     for (final style in styles) {
       final indent = style.value.attributes[Attribute.indent.key];
       final formatIndex = math.max(style.offset, selection.start);
-      final formatLength = math.min(
-            style.offset + (style.length ?? 0),
-            selection.end,
-          ) -
+      final formatLength =
+          math.min(style.offset + (style.length ?? 0), selection.end) -
           style.offset;
       Attribute? formatAttribute;
       if (indent == null) {
@@ -238,22 +233,27 @@ class QuillController extends ChangeNotifier {
   /// Returns all styles and Embed for each node within selection
   List<OffsetValue> getAllIndividualSelectionStylesAndEmbed() {
     final stylesAndEmbed = document.collectAllIndividualStyleAndEmbed(
-        selection.start, selection.end - selection.start);
+      selection.start,
+      selection.end - selection.start,
+    );
     return stylesAndEmbed;
   }
 
   /// Returns plain text for each node within selection
   String getPlainText() {
-    final text =
-        document.getPlainText(selection.start, selection.end - selection.start);
+    final text = document.getPlainText(
+      selection.start,
+      selection.end - selection.start,
+    );
     return text;
   }
 
   /// Returns all styles for any character within the specified text range.
   List<Style> getAllSelectionStyles() {
     final styles = document.collectAllStyles(
-        selection.start, selection.end - selection.start)
-      ..add(toggledStyle);
+      selection.start,
+      selection.end - selection.start,
+    )..add(toggledStyle);
     return styles;
   }
 
@@ -265,12 +265,7 @@ class QuillController extends ChangeNotifier {
   }
 
   void _handleHistoryChange(int len) {
-    updateSelection(
-      TextSelection.collapsed(
-        offset: len,
-      ),
-      ChangeSource.local,
-    );
+    updateSelection(TextSelection.collapsed(offset: len), ChangeSource.local);
   }
 
   void redo() {
@@ -286,8 +281,12 @@ class QuillController extends ChangeNotifier {
 
   /// clear editor
   void clear() {
-    replaceText(0, plainTextEditingValue.text.length - 1, '',
-        const TextSelection.collapsed(offset: 0));
+    replaceText(
+      0,
+      plainTextEditingValue.text.length - 1,
+      '',
+      const TextSelection.collapsed(offset: 0),
+    );
   }
 
   void replaceTextOri(
@@ -310,10 +309,15 @@ class QuillController extends ChangeNotifier {
       delta = document.replace(index, len, data);
 
       /// Remove block styles as they can only be attached to line endings
-      style = Style.attr(Map<String, Attribute>.fromEntries(toggledStyle
-          .attributes.entries
-          .where((a) => a.value.scope != AttributeScope.block)));
-      var shouldRetainDelta = style.isNotEmpty &&
+      style = Style.attr(
+        Map<String, Attribute>.fromEntries(
+          toggledStyle.attributes.entries.where(
+            (a) => a.value.scope != AttributeScope.block,
+          ),
+        ),
+      );
+      var shouldRetainDelta =
+          style.isNotEmpty &&
           delta.isNotEmpty &&
           delta.length <= 2 &&
           delta.last.isInsert;
@@ -322,8 +326,9 @@ class QuillController extends ChangeNotifier {
           delta.length == 2 &&
           delta.last.data == '\n') {
         // if all attributes are inline, shouldRetainDelta should be false
-        final anyAttributeNotInline =
-            style.values.any((attr) => !attr.isInline);
+        final anyAttributeNotInline = style.values.any(
+          (attr) => !attr.isInline,
+        );
         if (!anyAttributeNotInline) {
           shouldRetainDelta = false;
         }
@@ -346,11 +351,12 @@ class QuillController extends ChangeNotifier {
           ..delete(len);
         final positionDelta = getPositionDelta(user, delta);
         _updateSelection(
-            textSelection.copyWith(
-              baseOffset: textSelection.baseOffset + positionDelta,
-              extentOffset: textSelection.extentOffset + positionDelta,
-            ),
-            insertNewline: data == '\n');
+          textSelection.copyWith(
+            baseOffset: textSelection.baseOffset + positionDelta,
+            extentOffset: textSelection.extentOffset + positionDelta,
+          ),
+          insertNewline: data == '\n',
+        );
       }
     }
 
@@ -376,8 +382,9 @@ class QuillController extends ChangeNotifier {
         ? toggledStyle
         : (_pendingInlineStyle ?? const Style());
     final result = Map<String, Attribute>.fromEntries(
-      sourceStyle.attributes.entries
-          .where((a) => a.value.scope != AttributeScope.block),
+      sourceStyle.attributes.entries.where(
+        (a) => a.value.scope != AttributeScope.block,
+      ),
     );
     // _pendingInlineStyle의 null값 속성(서식 OFF 의도)을 누락 없이 반영한다.
     // _updateSelection의 mergeAll이 null값 속성을 제거하면 toggledStyle에서 사라지는데,
@@ -392,6 +399,19 @@ class QuillController extends ChangeNotifier {
         }
       }
     }
+    return Style.attr(result);
+  }
+
+  // 문서 서식(selectionStyle)에서 인라인(비블록) 속성만 추출한다.
+  // link는 이어 입력 시 링크가 확장되지 않도록 제외한다.
+  Style _inlineContextStyle(Style documentStyle) {
+    final result = Map<String, Attribute>.fromEntries(
+      documentStyle.attributes.entries.where(
+        (a) =>
+            a.value.scope != AttributeScope.block &&
+            a.key != Attribute.link.key,
+      ),
+    );
     return Style.attr(result);
   }
 
@@ -422,7 +442,8 @@ class QuillController extends ChangeNotifier {
       final newIndex = index + i;
       _styleCacheByIndex[newIndex] = document.collectStyle(newIndex, 1);
       _dbg(
-          '[replaceText] retain[$newIndex] savedStyle: ${_styleCacheByIndex[newIndex]}');
+        '[replaceText] retain[$newIndex] savedStyle: ${_styleCacheByIndex[newIndex]}',
+      );
     }
   }
 
@@ -479,6 +500,17 @@ class QuillController extends ChangeNotifier {
     // document.replace 전후로 toggledStyle/_pendingInlineStyle은 변경되지 않으므로
     // 미리 계산해서 블록 안팎 두 곳에서 재사용한다.
     final activeStyle = _onlyInlineToggledStyleStyle();
+    // IME 조합 교체 (한국어 등): ㄱ→가 처럼 composing text를 교체하는 경우
+    // _pendingInlineStyle 업데이트(블록 밖)에서도 참조하므로 여기서 미리 계산한다.
+    final isImeCompose = data is String && data.isNotEmpty && len > 0;
+    // 명시적 서식(activeStyle)이 없고 IME 조합이 아닌 경우,
+    // 커서 위치의 문서 서식(selectionStyle)에서 인라인 속성을 상속한다.
+    // 예: 빨간 텍스트 중간에 커서를 놓고 이모지를 입력하면 같은 색으로 이어진다.
+    // isImeCompose는 cachedChar 기반으로 서식을 처리하므로 여기서는 제외한다.
+    final effectiveActiveStyle =
+        (!isImeCompose && activeStyle.isEmpty)
+            ? _inlineContextStyle(selectionStyle)
+            : activeStyle;
 
     Delta? delta;
     if (len > 0 || data is! String || data.isNotEmpty) {
@@ -487,23 +519,29 @@ class QuillController extends ChangeNotifier {
       final indexStyle = getCachedStyle(index);
 
       _dbg(
-          '[replaceText] styleIndex=$index indexStyle=$indexStyle, $data replace[${delta.toJson()}]');
+        '[replaceText] styleIndex=$index indexStyle=$indexStyle, $data replace[${delta.toJson()}]',
+      );
 
       // 순수 삽입: [retain, insert] 또는 [insert]
       final isPureInsert = delta.length <= 2 && delta.last.isInsert;
-      // IME 조합 교체 (한국어 등): ㄱ→가 처럼 composing text를 교체하는 경우
-      final isImeCompose = data is String && data.isNotEmpty && len > 0;
-      var shouldRetainDelta = (activeStyle.isNotEmpty || indexStyle != null) &&
+
+      // indexStyle != null 만으로는 Style{}(서식 없음)도 shouldRetainDelta를 유발한다.
+      // 서식 없는 글자에 대해 retain을 적용해도 no-op이므로 isNotEmpty를 추가 확인한다.
+      var shouldRetainDelta =
+          (effectiveActiveStyle.isNotEmpty ||
+              (indexStyle != null && indexStyle.isNotEmpty)) &&
           delta.isNotEmpty &&
           (isPureInsert || isImeCompose);
-      final isEnd = activeStyle.isNotEmpty &&
+      final isEnd =
+          activeStyle.isNotEmpty &&
           delta.length == 2 &&
           delta.last.data == '\n';
 
       if (shouldRetainDelta && isEnd) {
         // if all attributes are inline, shouldRetainDelta should be false
-        final anyAttributeNotInline =
-            activeStyle.values.any((attr) => !attr.isInline);
+        final anyAttributeNotInline = activeStyle.values.any(
+          (attr) => !attr.isInline,
+        );
         if (!anyAttributeNotInline) {
           shouldRetainDelta = false;
         }
@@ -527,7 +565,7 @@ class QuillController extends ChangeNotifier {
               }
             }
             // 사용자가 OFF한 속성(null값) 중 캐시에 없는 것만 추가 (캐시 값은 덮어쓰지 않음).
-            for (final activeAttr in activeStyle.values) {
+            for (final activeAttr in effectiveActiveStyle.values) {
               if (activeAttr.value == null &&
                   !attrs.containsKey(activeAttr.key)) {
                 attrs[activeAttr.key] = activeAttr;
@@ -535,7 +573,7 @@ class QuillController extends ChangeNotifier {
             }
             charStyle = Style.attr(attrs);
           } else {
-            charStyle = activeStyle;
+            charStyle = effectiveActiveStyle;
           }
           // 안드로이드 IME 연속 compose replace 대비: 직전 retain 스타일을 다음 이벤트에서 재사용.
           if (isImeCompose) {
@@ -549,7 +587,8 @@ class QuillController extends ChangeNotifier {
         }
 
         _dbg(
-            '[replaceText] retain[$index ~ $number] isEnd:$isEnd activeStyle=$activeStyle');
+          '[replaceText] retain[$index ~ $number] isEnd:$isEnd activeStyle=$activeStyle',
+        );
 
         // retainDelta가 no-op retain만 포함하면 document.compose 내부 trim() 후
         // delta가 비어 assertion 실패하므로 사전에 체크한다.
@@ -567,17 +606,38 @@ class QuillController extends ChangeNotifier {
           _imePreservedStyles.remove(index + i);
         }
       }
+      // isImeCompose 변환 후 스테일 캐시 정리:
+      // 1) len > number: retain 루프가 처리하지 않은 위치(number..len-1)의 _styleCacheByIndex 제거
+      //    예: 「まるかっこ」(5글자) → 「（」(1글자) 변환 시 위치 1~4 스테일 제거
+      // 2) 모든 isImeCompose: 이전 변환 사이클에서 남은 _imePreservedStyles 스테일 엔트리 제거
+      //    삭제→재입력 사이클에서 빈 Style{}이 캐시에 남아 다음 변환에서 불필요한 retain을 유발
+      if (isImeCompose) {
+        for (var i = index + number; i < index + len; i++) {
+          _styleCacheByIndex.remove(i);
+        }
+        for (var i = index; i < index + math.max(len, number); i++) {
+          _imePreservedStyles.remove(i);
+        }
+      }
     }
 
     // 엔터('\n') 제외: 새 줄에서 toggledStyle이 iOS 다중 selection 이벤트에서도 유지되도록 한다.
     // 비어있으면 기존 값 유지: 한국어 IME 조합 중 document 일시 비워짐 등으로 유실 방지.
-    if ((data is! String || data != '\n') && activeStyle.isNotEmpty) {
-      _pendingInlineStyle = activeStyle;
+    // effectiveActiveStyle: 명시적 서식이 없을 때 selectionStyle 상속분도 포함하므로
+    // 이후 _updateSelection에서 toggledStyle을 올바르게 복원한다.
+    if ((data is! String || data != '\n') && effectiveActiveStyle.isNotEmpty) {
+      _pendingInlineStyle = effectiveActiveStyle;
     }
 
     if (textSelection != null) {
       if (delta == null || delta.isEmpty) {
         _updateSelection(textSelection);
+      } else if (isImeCompose) {
+        // IME compose replace (e.g. かっけ→かっこ): same char count, cursor stays
+        // where the IME placed it. Skip positionDelta to avoid a spurious
+        // sel=composing.end-1 mismatch that triggers an updateRemote correction
+        // which clears Samsung's composing span and cancels the conversion.
+        _updateSelection(textSelection, insertNewline: data == '\n');
       } else {
         final user = Delta()
           ..retain(index)
@@ -676,8 +736,9 @@ class QuillController extends ChangeNotifier {
     // the change. This is needed in cases when format operation actually5
     // inserts data into the document (e.g. embeds).
     final adjustedSelection = selection.copyWith(
-        baseOffset: change.transformPosition(selection.baseOffset),
-        extentOffset: change.transformPosition(selection.extentOffset));
+      baseOffset: change.transformPosition(selection.baseOffset),
+      extentOffset: change.transformPosition(selection.extentOffset),
+    );
     if (selection != adjustedSelection) {
       _updateSelection(adjustedSelection);
     }
@@ -686,8 +747,10 @@ class QuillController extends ChangeNotifier {
     }
   }
 
-  void formatSelection(Attribute? attribute,
-      {@experimental bool shouldNotifyListeners = true}) {
+  void formatSelection(
+    Attribute? attribute, {
+    @experimental bool shouldNotifyListeners = true,
+  }) {
     formatText(
       selection.start,
       selection.end - selection.start,
@@ -769,15 +832,18 @@ class QuillController extends ChangeNotifier {
     super.dispose();
   }
 
-  void _updateSelection(TextSelection textSelection,
-      {bool insertNewline = false}) {
+  void _updateSelection(
+    TextSelection textSelection, {
+    bool insertNewline = false,
+  }) {
     _selection = textSelection;
 
     final end = document.length - 1;
 
     _selection = selection.copyWith(
-        baseOffset: math.min(selection.baseOffset, end),
-        extentOffset: math.min(selection.extentOffset, end));
+      baseOffset: math.min(selection.baseOffset, end),
+      extentOffset: math.min(selection.extentOffset, end),
+    );
 
     if (keepStyleOnNewLine) {
       if (insertNewline && selection.start > 0) {
@@ -793,8 +859,9 @@ class QuillController extends ChangeNotifier {
         // 엔터 전 사용자가 변경한 서식(_pendingInlineStyle)을 우선 적용하고,
         // 이전 줄에서 상속할 스타일로 부족한 부분을 채운다.
         final prevPending = _pendingInlineStyle;
-        toggledStyle =
-            inheritedStyle.mergeAll(_pendingInlineStyle ?? toggledStyle);
+        toggledStyle = inheritedStyle.mergeAll(
+          _pendingInlineStyle ?? toggledStyle,
+        );
         // iOS는 Enter 한 번에 insertNewline=true 이벤트를 여러 번 보낸다.
         // mergeAll은 null-값 attr(예: bold:null)을 map에서 제거하므로,
         // prevPending의 null attr을 다시 추가하여 "서식 끄기" 의도를 보존한다.
@@ -806,11 +873,13 @@ class QuillController extends ChangeNotifier {
             }
           }
         }
-        _pendingInlineStyle =
-            pendingMap.isNotEmpty ? Style.attr(pendingMap) : null;
+        _pendingInlineStyle = pendingMap.isNotEmpty
+            ? Style.attr(pendingMap)
+            : null;
         _preserveToggledStyleOnNextSelection = false;
         _dbg(
-            '[replaceText] updateSelection 1:$toggledStyle [insertNewline && selection.start > 0] $insertNewline, ${selection.start}');
+          '[replaceText] updateSelection 1:$toggledStyle [insertNewline && selection.start > 0] $insertNewline, ${selection.start}',
+        );
       } else if (_preserveToggledStyleOnNextSelection) {
         // 서식 적용 직후 최초 selection 변경(재포커스 탭 등)은 toggledStyle을 보존한다.
         _preserveToggledStyleOnNextSelection = false;
@@ -819,18 +888,21 @@ class QuillController extends ChangeNotifier {
         // Android에서 포커스 이벤트가 여러 번 올 때 _pendingInlineStyle로 복원한다.
         toggledStyle = _pendingInlineStyle ?? const Style();
         _dbg(
-            '[replaceText] updateSelection 2:$toggledStyle [!] $insertNewline, ${selection.start}');
+          '[replaceText] updateSelection 2:$toggledStyle [!] $insertNewline, ${selection.start}',
+        );
       }
     } else {
       if (_preserveToggledStyleOnNextSelection) {
         _preserveToggledStyleOnNextSelection = false;
         _dbg(
-            '[replaceText] updateSelection preserve(noKeepStyle):$toggledStyle');
+          '[replaceText] updateSelection preserve(noKeepStyle):$toggledStyle',
+        );
       } else {
         // Android에서 포커스 이벤트가 여러 번 올 때 _pendingInlineStyle로 복원한다.
         toggledStyle = _pendingInlineStyle ?? const Style();
         _dbg(
-            '[replaceText] updateSelection 3:$toggledStyle !keepStyleOnNewLine');
+          '[replaceText] updateSelection 3:$toggledStyle !keepStyleOnNewLine',
+        );
       }
     }
 
@@ -892,8 +964,12 @@ class QuillController extends ChangeNotifier {
       if (!copy) {
         if (readOnly) return false;
         final sel = selection;
-        replaceText(sel.start, sel.end - sel.start, '',
-            TextSelection.collapsed(offset: sel.start));
+        replaceText(
+          sel.start,
+          sel.end - sel.start,
+          '',
+          TextSelection.collapsed(offset: sel.start),
+        );
       }
       return true;
     }
@@ -981,8 +1057,11 @@ class QuillController extends ChangeNotifier {
 
     if (plainText != null) {
       final plainTextToPaste = await getTextToPaste(plainText);
-      if (await pastePlainTextOrDelta(plainTextToPaste,
-          pastePlainText: _pastePlainText, pasteDelta: _pasteDelta)) {
+      if (await pastePlainTextOrDelta(
+        plainTextToPaste,
+        pastePlainText: _pastePlainText,
+        pasteDelta: _pasteDelta,
+      )) {
         updateEditor?.call();
         return true;
       }
@@ -1005,12 +1084,7 @@ class QuillController extends ChangeNotifier {
     if (copiedImageUrl != null) {
       final index = selection.baseOffset;
       final length = selection.extentOffset - index;
-      replaceText(
-        index,
-        length,
-        BlockEmbed.image(copiedImageUrl.url),
-        null,
-      );
+      replaceText(index, length, BlockEmbed.image(copiedImageUrl.url), null);
       if (copiedImageUrl.styleString.isNotEmpty) {
         formatText(
           getEmbedNode(this, index + 1).offset,
@@ -1019,9 +1093,7 @@ class QuillController extends ChangeNotifier {
         );
       }
       _copiedImageUrl = null;
-      await Clipboard.setData(
-        const ClipboardData(text: ''),
-      );
+      await Clipboard.setData(const ClipboardData(text: ''));
       return true;
     }
     return false;
@@ -1035,19 +1107,30 @@ class QuillController extends ChangeNotifier {
     bool ignoreFocus = false,
     @experimental bool shouldNotifyListeners = true,
   }) {
-    final containsEmbed =
-        insertedText.codeUnits.contains(Embed.kObjectReplacementInt);
-    insertedText =
-        containsEmbed ? _adjustInsertedText(insertedText) : insertedText;
+    final containsEmbed = insertedText.codeUnits.contains(
+      Embed.kObjectReplacementInt,
+    );
+    insertedText = containsEmbed
+        ? _adjustInsertedText(insertedText)
+        : insertedText;
 
-    replaceText(index, len, insertedText, textSelection,
-        ignoreFocus: ignoreFocus, shouldNotifyListeners: shouldNotifyListeners);
+    replaceText(
+      index,
+      len,
+      insertedText,
+      textSelection,
+      ignoreFocus: ignoreFocus,
+      shouldNotifyListeners: shouldNotifyListeners,
+    );
 
     _applyPasteStyleAndEmbed(insertedText, index, containsEmbed);
   }
 
   void _applyPasteStyleAndEmbed(
-      String insertedText, int start, bool containsEmbed) {
+    String insertedText,
+    int start,
+    bool containsEmbed,
+  ) {
     if (insertedText == pastePlainText && pastePlainText != '' ||
         containsEmbed) {
       final pos = start;
