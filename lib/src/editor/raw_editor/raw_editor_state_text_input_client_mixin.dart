@@ -308,11 +308,11 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
       // 삼성 일본어 IME 등은 かっこ→() 변환 시 커서를 괄호 뒤(offset=2)로 전송한다.
       // replaceText에 전달하기 전에 커서를 괄호 사이(start+1)로 조정한다.
       // 별도 updateSelection 호출을 피해 추가적인 notifyListeners 연쇄를 막는다.
-      // Gboard처럼 이미 start+1로 보내는 경우(extentOffset != start+2)는 조건이 false.
+      // 2자 괄호쌍이 단일 이벤트로 삽입된 경우는 항상 사이로 이동하는 것이 올바른 동작이므로
+      // IME가 보낸 커서 위치에 관계없이 적용한다.
       final effectiveSelection = (diff.inserted.length == 2 &&
               _isBracketPair(diff.inserted) &&
-              value.selection.isCollapsed &&
-              value.selection.extentOffset == diff.start + 2)
+              value.selection.isCollapsed)
           ? TextSelection.collapsed(offset: diff.start + 1)
           : value.selection;
 
@@ -351,15 +351,20 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
         _conversionPreviewActive = true;
       }
 
-      // 삼성 등 일부 IME는 변환 확정(wasComposing → composing 해제 + 텍스트 교체) 후에도
-      // 내부적으로 composing 세션을 유지한다. 다음 입력 시 변환 전 소스("か")를 기반으로
-      // 새 composing을 확장하여 "()" 대신 "かか\n" 같은 오동작을 일으킨다.
+      // 삼성 등 일부 IME는 변환 확정 후에도 내부적으로 composing 세션을 유지한다.
+      // 다음 입력 시 변환 전 소스를 기반으로 새 composing을 확장해 오동작을 일으킨다.
       // setEditingState를 명시적으로 전송해 Android IME의 composing span을 해제한다.
+      //
+      // 아래 두 경우에 force-confirm을 전송한다:
+      //   1. 기존: wasComposing 상태에서 텍스트 교체(かっこ→() 등)
+      //   2. 추가: 括弧쌍 삽입 — wasComposing 없이 후보목록에서 ()를 직접 선택해도
+      //            Samsung은 내부 composing span을 유지해 다음 입력으로 괄호를 교체한다.
+      final isBracketPairInserted =
+          diff.inserted.length == 2 && _isBracketPair(diff.inserted);
       if (hasConnection &&
-          wasComposing &&
           !value.composing.isValid &&
-          diff.deleted.isNotEmpty &&
-          diff.inserted.isNotEmpty) {
+          ((wasComposing && diff.deleted.isNotEmpty && diff.inserted.isNotEmpty) ||
+              isBracketPairInserted)) {
         final confirmedValue = textEditingValue.copyWith(
           composing: const TextRange(start: -1, end: -1),
         );
@@ -524,6 +529,7 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
     '（': '）', '「': '」', '『': '』',
     '【': '】', '《': '》', '〈': '〉',
     '〔': '〕', '［': '］', '｛': '｝',
+    '｢': '｣', // halfwidth corner brackets (Samsung IME sends these for かぎかっこ)
   };
 
   static bool _isBracketPair(String s) =>
