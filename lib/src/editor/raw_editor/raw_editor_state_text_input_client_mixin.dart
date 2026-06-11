@@ -27,6 +27,13 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
   // _updateSelection 실행 전에 sel=old 상태로 spurious send를 일으킬 수 있음)
   bool _processingIMEEvent = false;
 
+  // 삼성 일본어 IME는 변환 확정 전 composing이 활성 상태인 채로 변환 결과("()")를 먼저 보낸다.
+  // 이후 composing을 해제하며 커서를 괄호 사이({1,1})로 이동하는 이벤트를 별도로 전송한다.
+  // 이 플래그는 "composing active + 텍스트 교체" 처리 후 세워지고,
+  // 다음 정상 처리 이벤트에서 내려진다. 세워진 동안에는 line 261 skip을 억제해
+  // 括弧 사이 커서 이벤트가 정상 처리되도록 한다.
+  bool _conversionPreviewActive = false;
+
   set _lastKnownRemoteTextEditingValue(TextEditingValue? value) {
     __lastKnownRemoteTextEditingValue = value;
     if (composingRange.value != value?.composing) {
@@ -259,11 +266,13 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
     // stored는 갱신하지 않는다. 갱신하면 actual.sel ≠ stored.sel 불일치가 생겨
     // updateRemoteValueIfNeeded가 spurious send를 유발한다.
     if (_lastKnownRemoteTextEditingValue!.text == value.text &&
-        _lastKnownRemoteTextEditingValue!.composing.isValid) {
+        _lastKnownRemoteTextEditingValue!.composing.isValid &&
+        !_conversionPreviewActive) {
       _dbg('[IME] ← skip: IME cursor reposition (text same, prev composing active; '
           'new composing=${value.composing})');
       return;
     }
+    _conversionPreviewActive = false;
 
     // 이후 처리에서 _lastKnownRemoteTextEditingValue를 incoming value로 먼저 업데이트하고
     // replaceText/forceToggledStyle의 notifyListeners가 중간에 updateRemoteValueIfNeeded를
@@ -296,6 +305,25 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
           ? effectiveStyle
           : null;
 
+      // 삼성 일본어 IME 등은 かっこ→() 변환 시 커서를 괄호 뒤(offset=2)로 전송한다.
+      // replaceText에 전달하기 전에 커서를 괄호 사이(start+1)로 조정한다.
+      // 별도 updateSelection 호출을 피해 추가적인 notifyListeners 연쇄를 막는다.
+      // Gboard처럼 이미 start+1로 보내는 경우(extentOffset != start+2)는 조건이 false.
+      final effectiveSelection = (diff.inserted.length == 2 &&
+              _isBracketPair(diff.inserted) &&
+              value.selection.isCollapsed &&
+              value.selection.extentOffset == diff.start + 2)
+          ? TextSelection.collapsed(offset: diff.start + 1)
+          : value.selection;
+
+      if (effectiveSelection != value.selection) {
+        _dbg('[IME] bracket-pair detected "${diff.inserted}": cursor ${value.selection.extentOffset} → ${diff.start + 1}');
+        // _lastKnownRemoteTextEditingValue도 조정된 sel로 갱신해 force-confirm이 올바른 sel을 쓰도록 한다.
+        _lastKnownRemoteTextEditingValue = _lastKnownRemoteTextEditingValue!.copyWith(
+          selection: effectiveSelection,
+        );
+      }
+
       _dbg('[mixin] diff="${diff.deleted}"→"${diff.inserted}" '
           'composing=${value.composing} wasComposing=$wasComposing '
           'pendingInlineStyle=${widget.controller.pendingInlineStyle} '
@@ -306,7 +334,7 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
         diff.start,
         diff.deleted.length,
         diff.inserted,
-        value.selection,
+        effectiveSelection,
       );
 
       if (composingStyle != null) {
@@ -314,6 +342,13 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
         // 여기서 formatText로 전체 범위에 다시 적용하면 앞 글자의 원래 서식을 덮어쓰므로 제거.
         // forceToggledStyle만 호출해 다음 IME 이벤트에서 toggledStyle 상태를 유지한다.
         widget.controller.forceToggledStyle(composingStyle);
+      }
+
+      // composing active 상태에서 텍스트 교체(変換プレビュー)가 발생한 경우,
+      // 다음 이벤트에서 커서가 괄호 사이 등 최종 위치로 이동하는 별도 이벤트를 보낸다.
+      // skip 조건(line 268)이 이 이벤트를 억제하지 않도록 플래그를 세운다.
+      if (value.composing.isValid && diff.deleted.isNotEmpty && diff.inserted.isNotEmpty) {
+        _conversionPreviewActive = true;
       }
 
       // 삼성 등 일부 IME는 변환 확정(wasComposing → composing 해제 + 텍스트 교체) 후에도
@@ -483,4 +518,14 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
       SchedulerBinding.instance.addPostFrameCallback((_) => _updateSizeAndTransform());
     }
   }
+
+  static const Map<String, String> _bracketPairs = {
+    '(': ')', '[': ']', '{': '}',
+    '（': '）', '「': '」', '『': '』',
+    '【': '】', '《': '》', '〈': '〉',
+    '〔': '〕', '［': '］', '｛': '｝',
+  };
+
+  static bool _isBracketPair(String s) =>
+      s.length == 2 && _bracketPairs[s[0]] == s[1];
 }
