@@ -384,4 +384,415 @@ void main() {
           reason: '원래 bold로 입력된 "ㄴ"이 "나"가 될 때 bold 유지');
     });
   });
+
+  // ────────────────────────────────────────────────
+  // 일본어 IME 괄호 변환 테스트
+  //
+  // 일본어 IME에서 특정 단어(예: まるかっこ)를 입력 후
+  // 특수기호(예: 「（」)로 변환할 때의 동작 검증.
+  //
+  // 핵심 버그: isImeCompose에서 len > number일 때(예: 5글자→1글자)
+  //   else if 블록이 모든 삭제 위치(0..len-1)를 캐시하지만,
+  //   retain 루프는 0..number-1만 업데이트한다.
+  //   number..len-1 위치가 _styleCacheByIndex에 스테일(stale)로 남아
+  //   삭제 후 재입력 시 _imePreservedStyles로 복사되어 불필요한
+  //   document.compose를 유발하는 문제를 검증한다.
+  // ────────────────────────────────────────────────
+  group('일본어 IME 괄호 변환', () {
+    late QuillController c;
+
+    setUp(() {
+      c = QuillController.basic();
+    });
+
+    tearDown(() {
+      c.dispose();
+    });
+
+    // --------------------------------------------------
+    // JA-T1: まるかっこ(5글자) → （(1글자) 1회 변환
+    //
+    // 일본어 IME 이벤트 시퀀스:
+    //   INSERT "ま" → COMPOSE "まる" → COMPOSE "まるか"
+    //   → COMPOSE "まるかっ" → COMPOSE "まるかっこ"
+    //   → 후보 선택으로 COMPOSE "（" (len=5, number=1)
+    //
+    // 기대: 문서에 「（」만 남아야 함
+    // --------------------------------------------------
+    test('JA-T1: まるかっこ→（ 1회 변환 정상', () {
+      // 일본어 로마자 입력 composing 시퀀스
+      ime(c, 0, 0, 'ま');     // isInsertOnly: "ま" 삽입
+      ime(c, 0, 1, 'まる');   // isImeCompose: len=1, number=2
+      ime(c, 0, 2, 'まるか'); // isImeCompose: len=2, number=3
+      ime(c, 0, 3, 'まるかっ'); // isImeCompose: len=3, number=4
+      ime(c, 0, 4, 'まるかっこ'); // isImeCompose: len=4, number=5
+      // 후보 선택: len=5, number=1 → stale entries [1..4] 발생
+      ime(c, 0, 5, '（');
+
+      expect(c.document.toPlainText(), equals('（\n'),
+          reason: '1회째 まるかっこ→（ 변환 후 문서에 「（」가 있어야 함');
+    });
+
+    // --------------------------------------------------
+    // JA-T2: 1회 변환 후 삭제 → 2회째 변환 (스테일 캐시 회귀 테스트)
+    //
+    // 버그 재현 시나리오:
+    //   1회: まるかっこ → （  (len=5→1 시 positions 1..4가 stale)
+    //   삭제: 「（」 삭제 → document 비어짐
+    //         → _imePreservedStyles에 stale entries [1..4] 복사됨
+    //   2회: まるかっこ → （  (stale 엔트리로 인한 불필요한 compose 발생)
+    //
+    // 기대: 2회째도 「（」가 정상 입력되어야 함
+    // --------------------------------------------------
+    test('JA-T2: 1회 변환 후 삭제 → 2회째 변환도 정상 (스테일 캐시 회귀)', () {
+      // 1회째 변환
+      ime(c, 0, 0, 'ま');
+      ime(c, 0, 1, 'まる');
+      ime(c, 0, 2, 'まるか');
+      ime(c, 0, 3, 'まるかっ');
+      ime(c, 0, 4, 'まるかっこ');
+      ime(c, 0, 5, '（'); // isImeCompose: len=5, number=1 → stale entries [1..4]
+
+      expect(c.document.toPlainText(), equals('（\n'), reason: '1회째 변환 확인');
+
+      // 「（」 삭제 → document.length <= 1 → stale entries가 _imePreservedStyles로 복사됨
+      ime(c, 0, 1, '');
+      expect(c.document.toPlainText(), equals('\n'), reason: '삭제 후 문서 비어야 함');
+
+      // 2회째 변환 (버그가 있으면 이 시퀀스가 올바르게 동작하지 않음)
+      ime(c, 0, 0, 'ま');
+      ime(c, 0, 1, 'まる');
+      ime(c, 0, 2, 'まるか');
+      ime(c, 0, 3, 'まるかっ');
+      ime(c, 0, 4, 'まるかっこ');
+      ime(c, 0, 5, '（');
+
+      expect(c.document.toPlainText(), equals('（\n'),
+          reason: '2회째 まるかっこ→（ 변환도 「（」가 정상 입력되어야 함 (스테일 캐시 버그 회귀 방지)');
+    });
+
+    // --------------------------------------------------
+    // JA-T3: 1→1 단순 변환 「(」→「（」 2회 연속 (삭제 후 재시도)
+    //
+    // 일본어 IME에서 ASCII「(」를 전각「（」로 직접 변환하는 경우.
+    // len=1, number=1이므로 스테일 엔트리 문제는 없지만
+    // _imePreservedStyles 기반 shouldRetainDelta 동작을 검증한다.
+    // --------------------------------------------------
+    test('JA-T3: ASCII (→ 전각（ 1→1 변환 후 삭제 → 2회째도 정상', () {
+      // 1회째 (isInsertOnly "(", isImeCompose "(→（")
+      ime(c, 0, 0, '(');   // isInsertOnly
+      ime(c, 0, 1, '（');  // isImeCompose: len=1, number=1
+
+      expect(c.document.toPlainText(), equals('（\n'), reason: '1회째 「（」 확인');
+
+      // 삭제
+      ime(c, 0, 1, '');
+      expect(c.document.toPlainText(), equals('\n'));
+
+      // 2회째
+      ime(c, 0, 0, '(');
+      ime(c, 0, 1, '（');
+
+      expect(c.document.toPlainText(), equals('（\n'),
+          reason: '2회째도 「（」가 정상 입력되어야 함');
+    });
+
+    // --------------------------------------------------
+    // JA-T4: bold 없는 환경에서 まるかっこ→（ 2회 변환 시 bold 오염 없음
+    //
+    // stale cache에 의한 불필요한 retain이 실행되더라도
+    // 서식이 없는 문서에서 bold가 전파되지 않아야 한다.
+    // --------------------------------------------------
+    test('JA-T4: 서식 없는 환경에서 まるかっこ→（ 2회 변환 후 bold 없음', () {
+      // 1회째
+      ime(c, 0, 0, 'ま');
+      ime(c, 0, 1, 'まる');
+      ime(c, 0, 2, 'まるか');
+      ime(c, 0, 3, 'まるかっ');
+      ime(c, 0, 4, 'まるかっこ');
+      ime(c, 0, 5, '（');
+
+      // 삭제 후 2회째
+      ime(c, 0, 1, '');
+      ime(c, 0, 0, 'ま');
+      ime(c, 0, 1, 'まる');
+      ime(c, 0, 2, 'まるか');
+      ime(c, 0, 3, 'まるかっ');
+      ime(c, 0, 4, 'まるかっこ');
+      ime(c, 0, 5, '（');
+
+      expect(attrValueAt(c, 0, Attribute.bold), isNot(isTrue),
+          reason: '서식 없는 「（」에 bold가 전파되면 안 됨');
+      expect(c.document.toPlainText(), equals('（\n'));
+    });
+
+    // --------------------------------------------------
+    // JA-T5: bold ON 상태에서 まるかっこ→（ 변환 시 bold 적용
+    //
+    // 사용자가 bold를 켠 상태에서 일본어 괄호를 입력하면
+    // 변환된 「（」에도 bold가 적용되어야 한다.
+    // --------------------------------------------------
+    test('JA-T5: bold ON 상태에서 まるかっこ→（ 변환 시 bold 유지', () {
+      c.formatText(0, 0, Attribute.bold);
+
+      ime(c, 0, 0, 'ま');
+      ime(c, 0, 1, 'まる');
+      ime(c, 0, 2, 'まるか');
+      ime(c, 0, 3, 'まるかっ');
+      ime(c, 0, 4, 'まるかっこ');
+      ime(c, 0, 5, '（');
+
+      expect(attrValueAt(c, 0, Attribute.bold), isTrue,
+          reason: 'bold ON 상태에서 変換した「（」は bold이어야 함');
+    });
+
+    // --------------------------------------------------
+    // JA-T6: 「か」→「（）」(1글자→2글자) 삭제 후 2회째 변환
+    //
+    // 재현 시나리오 (사용자 보고):
+    //   1회: か(composing) → （）(candidate 선택, isImeCompose len=1→number=2)
+    //   삭제: 「）」삭제 → 「（」삭제 → document 비어짐
+    //   2회: か → （） 재시도
+    //
+    // 기대: 2회째도 「（）」가 정상 입력되어야 함.
+    // 버그가 있으면 cursor가 「か」앞(position 0)으로 이동하고 「（）」가 입력되지 않는다.
+    // --------------------------------------------------
+    test('JA-T6: か→（） 1회 변환 후 삭제 → 2회째 변환 정상', () {
+      // 1회째: isInsertOnly "か" → isImeCompose "か"→"（）"
+      ime(c, 0, 0, 'か');          // isInsertOnly
+      ime(c, 0, 1, '（）');        // isImeCompose: len=1, number=2
+
+      expect(c.document.toPlainText(), equals('（）\n'),
+          reason: '1회째 か→（） 변환 확인');
+
+      // 삭제: 「）」→「（」 순서 삭제
+      ime(c, 1, 1, ''); // 「）」삭제
+      ime(c, 0, 1, ''); // 「（」삭제 → document 비어짐
+      expect(c.document.toPlainText(), equals('\n'),
+          reason: '삭제 후 document 비어야 함');
+
+      // 2회째: 같은 시퀀스 반복
+      ime(c, 0, 0, 'か');
+      ime(c, 0, 1, '（）');
+
+      expect(c.document.toPlainText(), equals('（）\n'),
+          reason: '2회째 か→（） 변환도 정상이어야 함 (cursor 이동 버그 회귀 방지)');
+    });
+
+    // --------------------------------------------------
+    // JA-T7: かっこ→（）2회 변환 (같은 프레임 내 삭제→재삽입)
+    //
+    // 재현 시나리오 (사용자 보고 "입력했던 글자를 삭제후 かっこ 입력 후 (를 선택하면 선택이 안됨"):
+    //   1회: か → （） 변환
+    //   같은 프레임에 삭제 + 2회째 か → （） 변환
+    //
+    // 기대: _pendingStyleReset 취소가 올바르게 동작하고 2회째도 「（）」가 입력됨.
+    // --------------------------------------------------
+    test('JA-T7: 같은 프레임 내 삭제+재삽입 후 か→（） 변환 정상', () {
+      // 1회째 변환
+      ime(c, 0, 0, 'か');
+      ime(c, 0, 1, '（）');
+      expect(c.document.toPlainText(), equals('（）\n'));
+
+      // 같은 프레임: 삭제 후 즉시 재삽입 (_pendingStyleReset 취소 경로)
+      ime(c, 1, 1, '');
+      ime(c, 0, 1, ''); // document 비어짐 → _pendingStyleReset = true
+      // _pendingStyleReset이 false로 취소되어야 함:
+      ime(c, 0, 0, 'か');      // INSERT → _pendingStyleReset = false
+      ime(c, 0, 1, '（）');    // isImeCompose len=1→2
+
+      expect(c.document.toPlainText(), equals('（）\n'),
+          reason: '같은 프레임 삭제+재삽입 후에도 か→（） 변환이 정상이어야 함');
+    });
+
+    // --------------------------------------------------
+    // JA-T8: か→（） 5회 연속 삭제+재입력 반복
+    //
+    // _styleCacheByIndex / _imePreservedStyles 상태 축적 없이
+    // 매 사이클이 이전 사이클의 영향을 받지 않아야 한다.
+    // --------------------------------------------------
+    test('JA-T8: か→（） 5회 연속 삭제+재입력 반복 — 매 사이클 정상', () {
+      void oneCycle(int round) {
+        ime(c, 0, 0, 'か');
+        ime(c, 0, 1, '（）');
+        expect(c.document.toPlainText(), equals('（）\n'),
+            reason: '$round회째 변환 확인');
+        // 「）」→「（」순서 삭제
+        ime(c, 1, 1, '');
+        ime(c, 0, 1, '');
+        expect(c.document.toPlainText(), equals('\n'),
+            reason: '$round회째 삭제 후 document 비어야 함');
+      }
+
+      for (var i = 1; i <= 5; i++) {
+        oneCycle(i);
+      }
+
+      // 마지막 변환 (5회 삭제 후)
+      ime(c, 0, 0, 'か');
+      ime(c, 0, 1, '（）');
+      expect(c.document.toPlainText(), equals('（）\n'),
+          reason: '5회 반복 후 마지막 変換도 정상이어야 함 (상태 축적 버그 방지)');
+    });
+
+    // --------------------------------------------------
+    // JA-T9: か→（） 반복 + まるかっこ→（ 혼합 삭제+재입력
+    //
+    // len=1→2 변환과 len=5→1 변환이 혼재할 때 캐시 오염 없음을 검증한다.
+    // --------------------------------------------------
+    test('JA-T9: か→（） 와 まるかっこ→（ 혼합 5회 반복 — 상태 오염 없음', () {
+      void shortCycle(int round) {
+        ime(c, 0, 0, 'か');
+        ime(c, 0, 1, '（）');
+        expect(c.document.toPlainText(), equals('（）\n'),
+            reason: '[$round] か→（） 변환 확인');
+        ime(c, 1, 1, '');
+        ime(c, 0, 1, '');
+      }
+
+      void longCycle(int round) {
+        ime(c, 0, 0, 'ま');
+        ime(c, 0, 1, 'まる');
+        ime(c, 0, 2, 'まるか');
+        ime(c, 0, 3, 'まるかっ');
+        ime(c, 0, 4, 'まるかっこ');
+        ime(c, 0, 5, '（');
+        expect(c.document.toPlainText(), equals('（\n'),
+            reason: '[$round] まるかっこ→（ 변환 확인');
+        ime(c, 0, 1, '');
+      }
+
+      // 혼합 반복: short → long → short → long → short
+      shortCycle(1);
+      longCycle(2);
+      shortCycle(3);
+      longCycle(4);
+      shortCycle(5);
+
+      // 마지막 변환
+      ime(c, 0, 0, 'か');
+      ime(c, 0, 1, '（）');
+      expect(c.document.toPlainText(), equals('（）\n'),
+          reason: '혼합 반복 후 마지막 変換도 정상이어야 함');
+      expect(attrValueAt(c, 0, Attribute.bold), isNot(isTrue),
+          reason: 'bold 오염 없어야 함');
+    });
+
+    // --------------------------------------------------
+    // JA-T10: か→（） 변환 후 삭제 없이 か 재입력
+    //
+    // 재현 시나리오:
+    //   1. か → （） 변환 (cursor at 1, 괄호 안)
+    //   2. 삭제 없이 cursor 위치(1)에서 か 재입력
+    //   3. 문서: "（か）\n" — 정상 삽입 확인
+    //   4. 그 か 도 （）로 변환 가능 확인 → "（（））\n"
+    //
+    // 이전 변환 후 남은 캐시가 다음 입력에 영향을 주지 않아야 한다.
+    // --------------------------------------------------
+    test('JA-T10: か→（） 변환 후 삭제 없이 か 재입력 — 괄호 안 정상 입력', () {
+      // 1단계: か → （） 변환
+      ime(c, 0, 0, 'か');         // isInsertOnly at 0
+      ime(c, 0, 1, '（）');       // isImeCompose len=1→2, cursor → sel(2)
+
+      expect(c.document.toPlainText(), equals('（）\n'),
+          reason: '1단계: か→（） 변환 확인');
+
+      // 2단계: cursor=1 (괄호 안)에서 か 삽입 (삭제 없이)
+      // Samsung 키보드 기준: 변환 후 cursor가 （ 다음 위치(1)에 있음
+      ime(c, 1, 0, 'か');         // isInsertOnly at 1
+
+      expect(c.document.toPlainText(), equals('（か）\n'),
+          reason: '2단계: 괄호 안에 か 삽입 확인');
+
+      // 3단계: 괄호 안의 か(position 1)를 （）로 재변환
+      ime(c, 1, 1, '（）');       // isImeCompose len=1→2 at position 1
+
+      expect(c.document.toPlainText(), equals('（（））\n'),
+          reason: '3단계: 괄호 안의 か→（） 중첩 변환 확인');
+    });
+
+    // --------------------------------------------------
+    // JA-T11: か→（） 변환 후 삭제 없이 か 재입력 + 변환 → 삭제 → 다시 か 입력
+    //
+    // 복합 시나리오: 변환 중 삽입+삭제가 혼재할 때
+    //   1. か → （）
+    //   2. 괄호 안에 か 삽입 → "（か）"
+    //   3. か(at 1) 삭제 → "（）"
+    //   4. 다시 か 삽입 + 변환 → 정상 동작 확인
+    // --------------------------------------------------
+    test('JA-T11: か→（） 후 괄호 안 か 삽입+삭제+재삽입+변환 — 연속 상태 정상', () {
+      // 1단계: か → （）
+      ime(c, 0, 0, 'か');
+      ime(c, 0, 1, '（）');
+      expect(c.document.toPlainText(), equals('（）\n'));
+
+      // 2단계: 괄호 안에 か 삽입
+      ime(c, 1, 0, 'か');
+      expect(c.document.toPlainText(), equals('（か）\n'));
+
+      // 3단계: か(at 1) 삭제 → "（）\n"
+      ime(c, 1, 1, '');
+      expect(c.document.toPlainText(), equals('（）\n'),
+          reason: '괄호 안 か 삭제 확인');
+
+      // 4단계: 괄호 안(position 1)에 か 재삽입 후 변환
+      ime(c, 1, 0, 'か');
+      ime(c, 1, 1, '（）');
+      expect(c.document.toPlainText(), equals('（（））\n'),
+          reason: '삭제 후 재삽입+변환 정상 확인');
+    });
+
+    // --------------------------------------------------
+    // JA-T12: か→（） 변환 후 괄호 다음(position 2)에서 か 입력
+    //
+    // 재현 시나리오:
+    //   1. か → （） 변환 → "（）\n", cursor at 1 (Samsung 기준)
+    //   2. cursor를 position 2(）다음)로 이동
+    //   3. か 입력 → 기대: "（）か\n"
+    //   4. 그 か 도 （）로 변환 가능 확인 → "（）（）\n"
+    // --------------------------------------------------
+    test('JA-T12: か→（） 변환 후 괄호 다음(position 2)에서 か 입력 → （）か', () {
+      // 1단계: か → （）
+      ime(c, 0, 0, 'か');
+      ime(c, 0, 1, '（）');
+      expect(c.document.toPlainText(), equals('（）\n'),
+          reason: '1단계: か→（） 변환 확인');
+
+      // 2단계: position 2 (）바로 다음)에 か 삽입
+      ime(c, 2, 0, 'か');
+      expect(c.document.toPlainText(), equals('（）か\n'),
+          reason: '2단계: 괄호 다음 か 삽입 → "（）か"이어야 함');
+
+      // 3단계: その か(at 2) 도 （）로 변환 → "（）（）\n"
+      ime(c, 2, 1, '（）');
+      expect(c.document.toPlainText(), equals('（）（）\n'),
+          reason: '3단계: 괄호 다음 か→（） 변환 → "（）（）"이어야 함');
+    });
+
+    // --------------------------------------------------
+    // JA-T13: か→（） 변환 후 괄호 다음 か 입력 → 삭제 → 재입력+변환
+    //
+    // 괄호 바깥에서의 삭제+재입력 사이클도 정상 동작해야 한다.
+    // --------------------------------------------------
+    test('JA-T13: か→（） 후 position 2에서 か 삽입 → 삭제 → 재입력+변환', () {
+      // 1단계: か → （）
+      ime(c, 0, 0, 'か');
+      ime(c, 0, 1, '（）');
+
+      // 2단계: position 2에 か 삽입 → "（）か\n"
+      ime(c, 2, 0, 'か');
+      expect(c.document.toPlainText(), equals('（）か\n'));
+
+      // 3단계: か(at 2) 삭제 → "（）\n"
+      ime(c, 2, 1, '');
+      expect(c.document.toPlainText(), equals('（）\n'),
+          reason: '괄호 다음 か 삭제 확인');
+
+      // 4단계: 다시 position 2에 か 삽입 후 변환
+      ime(c, 2, 0, 'か');
+      ime(c, 2, 1, '（）');
+      expect(c.document.toPlainText(), equals('（）（）\n'),
+          reason: '삭제 후 재삽입+변환 → "（）（）"이어야 함');
+    });
+  });
 }
