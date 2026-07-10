@@ -144,6 +144,18 @@ class QuillController extends ChangeNotifier {
 
   bool ignoreFocusOnTextChange = false;
 
+  /// 입력(특히 IME) 텍스트를 문서에 반영하기 전에 강제할 최대 글자수.
+  ///
+  /// 0 이하이면 제한 없음. grapheme(이모지 안전) 기준으로 세며 '\n'은 세지 않는다.
+  /// [RawEditorStateTextInputClientMixin.updateEditingValue] 에서 diff 를 문서에
+  /// 적용하기 전에 초과분을 잘라내므로, 문서를 사후에 줄일 때 발생하던 IME offset
+  /// desync 크래시 없이 화면에서도 실시간으로 길이가 제한된다.
+  /// (Flutter [LengthLimitingTextInputFormatter] 와 동일한 위치·방식)
+  int maxLength = 0;
+
+  /// [maxLength] 초과 입력이 잘렸을 때 호출된다. (토스트 등 사용자 알림용)
+  VoidCallback? onMaxLengthExceeded;
+
   /// Skip the keyboard request in [QuillRawEditorState.requestKeyboard].
   ///
   /// See also: [QuillRawEditorState._didChangeTextEditingValue]
