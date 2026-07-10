@@ -274,6 +274,22 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
     }
     _conversionPreviewActive = false;
 
+    // [maxLength] IME(일본어 자동완성 등) 입력을 문서에 반영(diff 적용)하기 전에
+    // 최대 길이를 강제한다. 여기서 잘라내면 문서·IME·플랫폼이 항상 같은 길이로
+    // 동기되므로, 문서를 사후에 줄일 때 발생하던 offset desync 크래시가 없다.
+    final maxLength = widget.controller.maxLength;
+    if (maxLength > 0) {
+      final capped = _capValueToMaxLength(value, maxLength);
+      if (capped != value) {
+        value = capped;
+        // 플랫폼 IME 가 초과분을 유지/재주장하지 못하도록 capped 상태를 즉시 전송한다.
+        if (hasConnection) {
+          _textInputConnection!.setEditingState(value);
+        }
+        widget.controller.onMaxLengthExceeded?.call();
+      }
+    }
+
     // 이후 처리에서 _lastKnownRemoteTextEditingValue를 incoming value로 먼저 업데이트하고
     // replaceText/forceToggledStyle의 notifyListeners가 중간에 updateRemoteValueIfNeeded를
     // 호출하더라도 spurious send가 발생하지 않도록 플래그를 세운다.
@@ -378,6 +394,33 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
     } finally {
       _processingIMEEvent = false;
     }
+  }
+
+  /// [value] 의 텍스트를 grapheme(이모지 안전) 기준 [maxLength] 까지 자른 새 값을
+  /// 반환한다. '\n' 은 길이에서 제외한다. 한도 이내이면 [value] 를 그대로 반환한다.
+  /// 잘린 경우 커서를 끝으로 두고 composing 을 비운다.
+  TextEditingValue _capValueToMaxLength(TextEditingValue value, int maxLength) {
+    final text = value.text;
+    var count = 0;
+    var cutIndex = text.length;
+    var pos = 0;
+    for (final gc in text.characters) {
+      if (gc != '\n') {
+        if (count >= maxLength) {
+          cutIndex = pos;
+          break;
+        }
+        count++;
+      }
+      pos += gc.length;
+    }
+    if (cutIndex >= text.length) return value; // 한도 이내
+    final newText = text.substring(0, cutIndex);
+    return TextEditingValue(
+      text: newText,
+      selection: TextSelection.collapsed(offset: newText.length),
+      composing: TextRange.empty,
+    );
   }
 
   @override
