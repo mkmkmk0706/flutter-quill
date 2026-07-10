@@ -513,9 +513,6 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
     _lastKnownRemoteTextEditingValue = null;
   }
 
-  @override
-  bool onFocusReceived() => false;
-
   void _updateSizeAndTransform() {
     if (hasConnection) {
       // Asking for renderEditor.size here can cause errors if layout hasn't
