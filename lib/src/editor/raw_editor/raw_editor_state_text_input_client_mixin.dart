@@ -275,14 +275,36 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
     _conversionPreviewActive = false;
 
     // [maxLength] IME(일본어 자동완성 등) 입력을 문서에 반영(diff 적용)하기 전에
-    // 최대 길이를 강제한다. 여기서 잘라내면 문서·IME·플랫폼이 항상 같은 길이로
-    // 동기되므로, 문서를 사후에 줄일 때 발생하던 offset desync 크래시가 없다.
+    // 최대 길이를 강제한다.
     final maxLength = widget.controller.maxLength;
-    if (maxLength > 0) {
+    if (maxLength > 0 && _exceedsMaxLength(value.text, maxLength)) {
+      // 초과 입력은 문서에 반영하지 않는다.
+      //
+      // 예전 방식은 초과분을 문자열 끝에서 잘랐는데(tail-trim), 커서가 중간에 있을 때
+      // 사용자가 건드리지도 않은 "뒷부분 기존 내용"이 삭제되고, 커서를 끝으로 강제 이동 +
+      // composing 을 비운 뒤 setEditingState 를 재전송하면서 이어지는 getDiff→replaceText
+      // 가 뒤틀린 삭제 범위를 만들어 문서를 손상시켰다.
+      // (디버그는 assert + 앱의 SafeQuillController try/catch 로 연산이 취소돼 손실이
+      //  드러나지 않지만, 릴리즈는 assert 제거로 그 손상이 그대로 적용됨)
+      //
+      // 대신 직전 정상 값(≤maxLength)으로 되돌려 초과분만 거부한다. 문서를 바꾸지 않고
+      // (아래 diff/replaceText 경로에 진입하지 않음) 커서도 직전 위치로 보존되어 desync 가 없다.
+      final revertTo = _lastKnownRemoteTextEditingValue;
+      if (revertTo != null && !_exceedsMaxLength(revertTo.text, maxLength)) {
+        // 초과 경계에서 IME 가 초과 후보를 재주장하지 못하도록 composing 을 비워 확정한다.
+        final confirmed = revertTo.copyWith(composing: TextRange.empty);
+        _lastKnownRemoteTextEditingValue = confirmed;
+        if (hasConnection) {
+          _textInputConnection!.setEditingState(confirmed);
+        }
+        widget.controller.onMaxLengthExceeded?.call();
+        return;
+      }
+
+      // 직전 정상 값이 없거나 그 자체가 이미 초과인 예외 상황: 안전하게 tail-trim 으로 폴백.
       final capped = _capValueToMaxLength(value, maxLength);
       if (capped != value) {
         value = capped;
-        // 플랫폼 IME 가 초과분을 유지/재주장하지 못하도록 capped 상태를 즉시 전송한다.
         if (hasConnection) {
           _textInputConnection!.setEditingState(value);
         }
@@ -396,9 +418,21 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
     }
   }
 
+  /// [text] 의 grapheme 수(이모지 안전, '\n' 제외)가 [maxLength] 를 초과하면 true.
+  bool _exceedsMaxLength(String text, int maxLength) {
+    var count = 0;
+    for (final gc in text.characters) {
+      if (gc == '\n') continue;
+      count++;
+      if (count > maxLength) return true;
+    }
+    return false;
+  }
+
   /// [value] 의 텍스트를 grapheme(이모지 안전) 기준 [maxLength] 까지 자른 새 값을
   /// 반환한다. '\n' 은 길이에서 제외한다. 한도 이내이면 [value] 를 그대로 반환한다.
   /// 잘린 경우 커서를 끝으로 두고 composing 을 비운다.
+  /// (직전 정상 값이 없는 예외 상황의 폴백 전용)
   TextEditingValue _capValueToMaxLength(TextEditingValue value, int maxLength) {
     final text = value.text;
     var count = 0;
