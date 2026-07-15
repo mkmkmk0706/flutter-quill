@@ -1,7 +1,8 @@
 import 'dart:developer';
 import 'dart:math' as math;
 
-import 'package:flutter/foundation.dart' show kDebugMode;
+import 'package:flutter/foundation.dart'
+    show defaultTargetPlatform, kDebugMode, TargetPlatform;
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart' show ClipboardData, Clipboard;
 import 'package:flutter/widgets.dart';
@@ -491,8 +492,20 @@ class QuillController extends ChangeNotifier {
     final selectionStyle = getSelectionStyle();
     final toggleStyle = toggledStyle;
 
+    // iOS 에서 삭제 후 입력 시 적용할 문맥 서식. null 이면 동기화하지 않는다.
+    Style? iosDeletedStyle;
+
     if (isDeleteOnly) {
       cacheStyle(index, len);
+      // iOS 는 IME composing 이 무효라 mixin 의 forceToggledStyle 동기화(Android 경로)가
+      // 일어나지 않는다. 그러면 캐시(삭제된 글자의 문맥 서식)와 toggledStyle(사용자가 켠 서식)이
+      // 서로 다른 값을 갖고, 삽입 시 글자마다 이긴 쪽이 달라진다.
+      // (캐시가 있는 앞 글자는 문맥 서식 → 캐시가 없는 뒷 글자는 toggledStyle)
+      // Android 와 동일하게 문맥 서식으로 통일하기 위해 삭제 시점에 toggledStyle 을 맞춘다.
+      // 실제 동기화는 _updateSelection 이 toggledStyle 을 리셋한 뒤인 이 메서드 끝에서 한다.
+      if (defaultTargetPlatform == TargetPlatform.iOS) {
+        iosDeletedStyle = getCachedStyle(index);
+      }
     } else if (data is String && data.isNotEmpty && len > 0) {
       // 안드로이드 IME는 composing range 전체를 replace하므로 이전 글자까지 포함된다.
       // isDeleteOnly가 아니어서 cacheStyle이 호출되지 않으므로,
@@ -664,6 +677,17 @@ class QuillController extends ChangeNotifier {
           insertNewline: data == '\n',
         );
       }
+    }
+
+    // iOS 삭제: 위에서 구한 문맥 서식으로 toggledStyle 을 동기화한다.
+    // _updateSelection 이 toggledStyle 을 리셋한 뒤여야 하므로 여기서 처리한다.
+    // _pendingInlineStyle 도 함께 갱신해야 이후 selection 이벤트에서 복원된다.
+    if (iosDeletedStyle != null) {
+      toggledStyle = iosDeletedStyle;
+      if (iosDeletedStyle.isNotEmpty) {
+        _pendingInlineStyle = iosDeletedStyle;
+      }
+      _dbg('[replaceText] iOS delete sync toggledStyle:$toggledStyle');
     }
 
     // document.length <= 1 (문서가 비워짐) 처리
