@@ -158,6 +158,30 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
     _lastKnownRemoteTextEditingValue = null;
   }
 
+  /// 진행 중인 IME 조합(한글/일본어 자동완성 등)을 즉시 확정하고 조합 상태를 해지한다.
+  ///
+  /// IME 는 조합 중 자기 사본(조합 버퍼)을 들고 있다가, 앱이 문서를 바꾸면 그 사본을
+  /// 다시 주장해 글자가 중복/유실되거나 커서가 어긋난다. 이미지·영상 임베드처럼 앱이
+  /// 문서 길이를 바꾸는 편집 직전에 호출해 조합을 끊어준다.
+  ///
+  /// 현재 텍스트는 그대로 두고 composing 만 비워 돌려주므로(= 요청과 다른 텍스트를 만들지
+  /// 않으므로) iOS 의 교정 동작을 유발하지 않는다. 키보드도 내려가지 않는다.
+  /// (maxLength 초과 처리에서 쓰는 방식과 동일)
+  void clearComposing() {
+    if (!hasConnection) {
+      return;
+    }
+    final value = _lastKnownRemoteTextEditingValue;
+    if (value == null || !value.composing.isValid) {
+      // 조합 중이 아니면 할 일이 없다. (iOS 는 composing 이 항상 무효라 대부분 여기서 끝난다)
+      return;
+    }
+    final confirmed = value.copyWith(composing: TextRange.empty);
+    _lastKnownRemoteTextEditingValue = confirmed;
+    _textInputConnection!.setEditingState(confirmed);
+    _dbg('[IME] clearComposing: $value -> $confirmed');
+  }
+
   /// Updates remote value based on current state of [document] and
   /// [selection].
   ///

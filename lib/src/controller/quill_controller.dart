@@ -162,6 +162,23 @@ class QuillController extends ChangeNotifier {
   /// See also: [QuillRawEditorState._didChangeTextEditingValue]
   bool skipRequestKeyboard = false;
 
+  /// [clearComposing] 의 실제 구현. 에디터가 부착될 때 스스로 등록한다.
+  ///
+  /// 컨트롤러는 에디터 state 를 참조하지 않으므로(IME 연결은 에디터가 쥐고 있다)
+  /// 콜백으로 연결한다. 에디터가 없거나 dispose 된 뒤에는 null 이라 호출이 무시된다.
+  @internal
+  VoidCallback? clearComposingHandler;
+
+  /// 진행 중인 IME 조합(한글/일본어 자동완성 등)을 확정하고 조합 상태를 해지한다.
+  ///
+  /// IME 는 조합 중 자기 사본을 들고 있다가 앱이 문서를 바꾸면 그 사본을 다시 주장해
+  /// 글자가 중복/유실되거나 커서가 어긋난다. 이미지·영상 임베드 삽입처럼 앱이 문서를
+  /// 직접 바꾸기 **직전에** 호출할 것.
+  ///
+  /// 조합 중이 아니거나 에디터가 붙어있지 않으면 아무 일도 하지 않는다.
+  /// 텍스트는 그대로 두고 composing 만 비우므로 키보드는 내려가지 않는다.
+  void clearComposing() => clearComposingHandler?.call();
+
   /// True when this [QuillController] instance has been disposed.
   ///
   /// A safety mechanism to ensure that listeners don't crash when adding,
