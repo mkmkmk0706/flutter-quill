@@ -503,8 +503,16 @@ class QuillController extends ChangeNotifier {
       // (캐시가 있는 앞 글자는 문맥 서식 → 캐시가 없는 뒷 글자는 toggledStyle)
       // Android 와 동일하게 문맥 서식으로 통일하기 위해 삭제 시점에 toggledStyle 을 맞춘다.
       // 실제 동기화는 _updateSelection 이 toggledStyle 을 리셋한 뒤인 이 메서드 끝에서 한다.
+      //
+      // ★ 범위의 첫 글자가 아니라 마지막 글자의 서식을 쓴다.
+      // iOS 한글 IME 는 음절을 조합할 때 이전 글자를 지웠다 다시 넣으며(예: "가나다ㄹ" 에서
+      // "다ㄹ" 삭제 → "다" 삽입 → "라" 삽입) 그 삭제가 이 경로로 들어온다.
+      // 사용자가 방금 켠 서식은 범위의 마지막 글자에만 들어있고 앞 글자는 아직 이전 서식이라,
+      // 첫 글자를 집으면 새로 고른 서식이 음절마다 이전 서식으로 되돌아간다.
+      // (배경색을 바꿔도 계속 이전 배경색으로 입력되던 증상)
+      // 백스페이스 1 글자 삭제는 index == index + len - 1 이라 동작이 같다.
       if (defaultTargetPlatform == TargetPlatform.iOS) {
-        iosDeletedStyle = getCachedStyle(index);
+        iosDeletedStyle = getCachedStyle(index + len - 1);
       }
     } else if (data is String && data.isNotEmpty && len > 0) {
       // 안드로이드 IME는 composing range 전체를 replace하므로 이전 글자까지 포함된다.
@@ -683,9 +691,26 @@ class QuillController extends ChangeNotifier {
     // _updateSelection 이 toggledStyle 을 리셋한 뒤여야 하므로 여기서 처리한다.
     // _pendingInlineStyle 도 함께 갱신해야 이후 selection 이벤트에서 복원된다.
     if (iosDeletedStyle != null) {
-      toggledStyle = iosDeletedStyle;
-      if (iosDeletedStyle.isNotEmpty) {
-        _pendingInlineStyle = iosDeletedStyle;
+      // 서식 OFF 의도(null 값 속성)는 캐시/문서에 남지 않는다. 문서에는 "키가 아예 없는"
+      // 상태로만 저장되고, 그 상태로 삽입하면 앞 글자의 서식을 상속해버린다.
+      // 따라서 캐시로 덮기 전에 기존 _pendingInlineStyle 의 null 속성을 되살려 OFF 를 유지한다.
+      // (배경색을 없앤 뒤 입력하면 이전 배경색이 다시 붙던 증상)
+      var syncStyle = iosDeletedStyle;
+      final pending = _pendingInlineStyle;
+      if (pending != null) {
+        final merged = Map<String, Attribute>.from(syncStyle.attributes);
+        for (final attr in pending.values) {
+          if (attr.value == null &&
+              attr.scope != AttributeScope.block &&
+              !merged.containsKey(attr.key)) {
+            merged[attr.key] = attr;
+          }
+        }
+        syncStyle = Style.attr(merged);
+      }
+      toggledStyle = syncStyle;
+      if (syncStyle.isNotEmpty) {
+        _pendingInlineStyle = syncStyle;
       }
       _dbg('[replaceText] iOS delete sync toggledStyle:$toggledStyle');
     }
