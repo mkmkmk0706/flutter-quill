@@ -528,8 +528,15 @@ class QuillController extends ChangeNotifier {
       // 첫 글자를 집으면 새로 고른 서식이 음절마다 이전 서식으로 되돌아간다.
       // (배경색을 바꿔도 계속 이전 배경색으로 입력되던 증상)
       // 백스페이스 1 글자 삭제는 index == index + len - 1 이라 동작이 같다.
+      //
+      // ★ link 는 제외한다(_inlineContextStyle).
+      // 캐시는 문서 서식 그대로라 링크 글자면 link 도 들어있다. 그대로 toggledStyle 에 실으면
+      // 링크 뒤에 이어 쓰는 글자마다 link 가 따라붙어 서식이 풀리지 않는다.
+      // iOS 한글 IME 는 음절마다 삭제→삽입을 반복해 이 경로를 계속 타므로 증상이 이어진다.
+      // (Android 는 composing 경로라 여기 오지 않아 문제가 없었다)
       if (defaultTargetPlatform == TargetPlatform.iOS) {
-        iosDeletedStyle = getCachedStyle(index + len - 1);
+        final cached = getCachedStyle(index + len - 1);
+        iosDeletedStyle = cached == null ? null : _inlineContextStyle(cached);
       }
     } else if (data is String && data.isNotEmpty && len > 0) {
       // 안드로이드 IME는 composing range 전체를 replace하므로 이전 글자까지 포함된다.
