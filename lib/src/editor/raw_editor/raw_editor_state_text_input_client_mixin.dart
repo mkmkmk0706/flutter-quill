@@ -16,6 +16,16 @@ void _dbg(String msg) {
   if (kDebugMode) debugPrint(msg);
 }
 
+/// 로그용. 값의 끝 10글자만 요약해서 보여준다.
+String _tailOf(TextEditingValue? v) {
+  if (v == null) return 'null';
+  final t = v.text.replaceAll('\n', '↵');
+  final len = t.characters.length;
+  final tail = len <= 10 ? t : '…${t.characters.takeLast(10)}';
+  return '"$tail"($len) sel=${v.selection.baseOffset}..${v.selection.extentOffset} '
+      'comp=${v.composing.start}..${v.composing.end}';
+}
+
 mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClient {
   TextInputConnection? _textInputConnection;
   TextEditingValue? __lastKnownRemoteTextEditingValue;
@@ -33,6 +43,16 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
   // 다음 정상 처리 이벤트에서 내려진다. 세워진 동안에는 line 261 skip을 억제해
   // 括弧 사이 커서 이벤트가 정상 처리되도록 한다.
   bool _conversionPreviewActive = false;
+
+  // iOS 한글 IME는 음절을 다시 조합할 때 마지막 글자들을 지웠다가 되채우는 이벤트를
+  // 여러 번에 나눠 보낸다. (실기기 로그: '…하세욧'(=maxLength) 에서 'ㅏ' 입력 →
+  //  ① del "세욧" → ② ins "세" → ③ ins "요사")
+  // ①②는 길이가 줄어/같아 maxLength 검사를 통과해 문서에 반영되는데 ③이 초과로 거부되면
+  // 초과분뿐 아니라 사용자가 이미 입력해둔 마지막 글자('욧')까지 사라진다.
+  // 그래서 ①의 적용 직전 값을 보관해 두었다가 초과 거부 시 그 값으로 복원한다.
+  // 되채우는 중(②)에도 보관을 유지해야 하며, 원래 길이까지 복구되면 해제한다.
+  // (Android는 조합 교체가 한 이벤트로 오므로 이 경로가 필요 없다)
+  TextEditingValue? _valueBeforeImeDelete;
 
   set _lastKnownRemoteTextEditingValue(TextEditingValue? value) {
     __lastKnownRemoteTextEditingValue = value;
@@ -156,6 +176,7 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
     _textInputConnection!.close();
     _textInputConnection = null;
     _lastKnownRemoteTextEditingValue = null;
+    _valueBeforeImeDelete = null;
   }
 
   /// 진행 중인 IME 조합(한글/일본어 자동완성 등)을 즉시 확정하고 조합 상태를 해지한다.
@@ -302,37 +323,55 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
     // 최대 길이를 강제한다.
     final maxLength = widget.controller.maxLength;
     if (maxLength > 0 && _exceedsMaxLength(value.text, maxLength)) {
-      // 초과 입력은 문서에 반영하지 않는다.
-      //
-      // 예전 방식은 초과분을 문자열 끝에서 잘랐는데(tail-trim), 커서가 중간에 있을 때
-      // 사용자가 건드리지도 않은 "뒷부분 기존 내용"이 삭제되고, 커서를 끝으로 강제 이동 +
-      // composing 을 비운 뒤 setEditingState 를 재전송하면서 이어지는 getDiff→replaceText
-      // 가 뒤틀린 삭제 범위를 만들어 문서를 손상시켰다.
-      // (디버그는 assert + 앱의 SafeQuillController try/catch 로 연산이 취소돼 손실이
-      //  드러나지 않지만, 릴리즈는 assert 제거로 그 손상이 그대로 적용됨)
-      //
-      // 대신 직전 정상 값(≤maxLength)으로 되돌려 초과분만 거부한다. 문서를 바꾸지 않고
-      // (아래 diff/replaceText 경로에 진입하지 않음) 커서도 직전 위치로 보존되어 desync 가 없다.
-      final revertTo = _lastKnownRemoteTextEditingValue;
-      if (revertTo != null && !_exceedsMaxLength(revertTo.text, maxLength)) {
-        // 초과 경계에서 IME 가 초과 후보를 재주장하지 못하도록 composing 을 비워 확정한다.
-        final confirmed = revertTo.copyWith(composing: TextRange.empty);
-        _lastKnownRemoteTextEditingValue = confirmed;
-        if (hasConnection) {
-          _textInputConnection!.setEditingState(confirmed);
-        }
-        widget.controller.onMaxLengthExceeded?.call();
-        return;
-      }
-
-      // 직전 정상 값이 없거나 그 자체가 이미 초과인 예외 상황: 안전하게 tail-trim 으로 폴백.
-      final capped = _capValueToMaxLength(value, maxLength);
-      if (capped != value) {
-        value = capped;
+      // [iOS 분할 이벤트] 직전에 "삭제만" 하는 이벤트가 문서에 반영된 뒤 이어지는 삽입이
+      // 초과로 거부되는 경우, 그 삭제까지 되돌려야 사용자가 입력해둔 마지막 글자가 남는다.
+      // (한글 IME 가 음절 재조합을 삭제/삽입 두 이벤트로 나눠 보내기 때문)
+      final restored = _restoreValueForSplitImeDelete(value, maxLength);
+      if (restored != null) {
+        _dbg('[MAXLEN] 분할 삭제 복원: prev=${_tailOf(_lastKnownRemoteTextEditingValue)} → '
+            'restored=${_tailOf(restored)}');
+        _valueBeforeImeDelete = null;
+        // 삽입은 거부하되, 삭제 이전 값을 플랫폼과 문서 양쪽에 되돌린다.
+        // (문서 복원은 아래 diff 경로가 수행한다)
+        value = restored;
         if (hasConnection) {
           _textInputConnection!.setEditingState(value);
         }
         widget.controller.onMaxLengthExceeded?.call();
+      } else {
+        // 초과 입력은 문서에 반영하지 않는다.
+        //
+        // 예전 방식은 초과분을 문자열 끝에서 잘랐는데(tail-trim), 커서가 중간에 있을 때
+        // 사용자가 건드리지도 않은 "뒷부분 기존 내용"이 삭제되고, 커서를 끝으로 강제 이동 +
+        // composing 을 비운 뒤 setEditingState 를 재전송하면서 이어지는 getDiff→replaceText
+        // 가 뒤틀린 삭제 범위를 만들어 문서를 손상시켰다.
+        // (디버그는 assert + 앱의 SafeQuillController try/catch 로 연산이 취소돼 손실이
+        //  드러나지 않지만, 릴리즈는 assert 제거로 그 손상이 그대로 적용됨)
+        //
+        // 대신 직전 정상 값(≤maxLength)으로 되돌려 초과분만 거부한다. 문서를 바꾸지 않고
+        // (아래 diff/replaceText 경로에 진입하지 않음) 커서도 직전 위치로 보존되어 desync 가 없다.
+        _dbg('[MAXLEN] 초과 거부: in=${_tailOf(value)} prev=${_tailOf(_lastKnownRemoteTextEditingValue)}');
+        final revertTo = _lastKnownRemoteTextEditingValue;
+        if (revertTo != null && !_exceedsMaxLength(revertTo.text, maxLength)) {
+          // 초과 경계에서 IME 가 초과 후보를 재주장하지 못하도록 composing 을 비워 확정한다.
+          final confirmed = revertTo.copyWith(composing: TextRange.empty);
+          _lastKnownRemoteTextEditingValue = confirmed;
+          if (hasConnection) {
+            _textInputConnection!.setEditingState(confirmed);
+          }
+          widget.controller.onMaxLengthExceeded?.call();
+          return;
+        }
+
+        // 직전 정상 값이 없거나 그 자체가 이미 초과인 예외 상황: 안전하게 tail-trim 으로 폴백.
+        final capped = _capValueToMaxLength(value, maxLength);
+        if (capped != value) {
+          value = capped;
+          if (hasConnection) {
+            _textInputConnection!.setEditingState(value);
+          }
+          widget.controller.onMaxLengthExceeded?.call();
+        }
       }
     }
 
@@ -350,6 +389,22 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
 
     // getDiff를 통해 변경 범위 계산
     final diff = getDiff(oldText, text, cursorPosition);
+
+    // 이번 이벤트가 "삭제만" 하는 이벤트면 적용 직전 값을 보관한다.
+    // 바로 다음 이벤트가 maxLength 로 거부될 때 이 값으로 되돌린다(iOS 한글 IME 분할 이벤트).
+    // selection-only 이벤트는 삭제/삽입 사이에 끼어들 수 있으므로 보관 값을 유지한다.
+    if (diff.inserted.isEmpty && diff.deleted.isNotEmpty) {
+      // 삭제만 하는 이벤트 = 재조합 버스트의 시작. 이 시점 직전 값을 되돌림 후보로 잡는다.
+      _valueBeforeImeDelete = effectiveLastKnownValue;
+      _dbg('[MAXLEN] 삭제 이전 값 보관=${_tailOf(_valueBeforeImeDelete)} (del="${diff.deleted}")');
+    } else if (_valueBeforeImeDelete != null && diff.inserted.isNotEmpty) {
+      // 삭제 뒤 IME 가 글자를 되채우는 중(버스트 진행)에는 후보를 유지한다.
+      // 원래 길이까지 복구되면 버스트가 정상 종료된 것이므로 후보를 버린다.
+      if (value.text.length >= _valueBeforeImeDelete!.text.length) {
+        _valueBeforeImeDelete = null;
+      } else {
+      }
+    }
 
     if (diff.deleted.isEmpty && diff.inserted.isEmpty) {
       _dbg('[IME] ← selection-only: sel → ${value.selection.baseOffset}..${value.selection.extentOffset}');
@@ -440,6 +495,57 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
     } finally {
       _processingIMEEvent = false;
     }
+  }
+
+  /// iOS 한글 IME 가 음절 재조합을 "삭제 이벤트 → 삽입 이벤트" 로 나눠 보낼 때,
+  /// 삽입이 [maxLength] 로 거부되면 앞선 삭제까지 되돌려야 할 값을 반환한다.
+  /// 되돌릴 필요/근거가 없으면 null.
+  ///
+  /// 예) '하네욧'(=maxLength) 에서 'ㅏ' 입력
+  ///   ① '욧' 삭제 → '하네'         (길이가 줄어 그대로 반영됨)
+  ///   ② '요샤' 삽입 → 초과로 거부   ← 여기서 ① 을 되돌리지 않으면 '욧' 까지 사라진다
+  ///
+  /// 조건:
+  /// - iOS (Android 는 조합 교체가 한 이벤트로 와서 이 상황 자체가 없다)
+  /// - 직전 이벤트가 "삭제만" 이었고, 그 삭제 이전 값이 [maxLength] 이내
+  /// - 이번 삽입이 그 삭제 지점에서 일어남(= 삭제 지점 앞 텍스트가 그대로)
+  ///
+  /// 사용자가 직접 백스페이스로 지운 뒤 한 글자를 친 경우는 초과가 될 수 없으므로
+  /// (삭제로 한도보다 짧아진 뒤 한 글자 삽입 = 한도 이내) 이 경로를 타지 않는다.
+  TextEditingValue? _restoreValueForSplitImeDelete(TextEditingValue incoming, int maxLength) {
+    if (defaultTargetPlatform != TargetPlatform.iOS) return null;
+
+    final beforeDelete = _valueBeforeImeDelete;
+    final afterDelete = _lastKnownRemoteTextEditingValue;
+    if (beforeDelete == null || afterDelete == null) {
+      return null;
+    }
+    if (beforeDelete.text.length <= afterDelete.text.length) {
+      return null;
+    }
+    if (_exceedsMaxLength(beforeDelete.text, maxLength)) {
+      return null;
+    }
+
+    // 삭제가 일어난 지점(= 삭제 후 커서) 기준으로, 그 앞부분이 그대로여야 같은 조합의 연속이다.
+    final deletedAt = afterDelete.selection.baseOffset;
+    if (deletedAt < 0 || !afterDelete.selection.isCollapsed) {
+      return null;
+    }
+    if (deletedAt > afterDelete.text.length || deletedAt > incoming.text.length) {
+      return null;
+    }
+    if (incoming.text.substring(0, deletedAt) != afterDelete.text.substring(0, deletedAt)) {
+      return null;
+    }
+
+    // 삭제 직전 값의 selection 은 IME 가 잡아둔 marked range(예: 98..100)일 수 있으므로
+    // 되돌릴 때는 그 끝으로 커서를 모아 준다.
+    final selection = beforeDelete.selection.isCollapsed
+        ? beforeDelete.selection
+        : TextSelection.collapsed(offset: beforeDelete.selection.end);
+    // IME 가 거부된 후보를 다시 주장하지 못하도록 composing 은 비워 확정한다.
+    return beforeDelete.copyWith(selection: selection, composing: TextRange.empty);
   }
 
   /// [text] 의 grapheme 수(이모지 안전, '\n' 제외)가 [maxLength] 를 초과하면 true.
