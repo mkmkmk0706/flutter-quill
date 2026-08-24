@@ -1,4 +1,3 @@
-import 'dart:developer';
 import 'dart:ui' show lerpDouble;
 
 import 'package:flutter/cupertino.dart';
@@ -14,12 +13,46 @@ import '../editor.dart';
 import 'raw_editor.dart';
 
 void _dbg(String msg) {
-  if (kDebugMode) log(msg);
+  if (kDebugMode) debugPrint(msg);
+}
+
+/// 로그용. 값의 끝 10글자만 요약해서 보여준다.
+String _tailOf(TextEditingValue? v) {
+  if (v == null) return 'null';
+  final t = v.text.replaceAll('\n', '↵');
+  final len = t.characters.length;
+  final tail = len <= 10 ? t : '…${t.characters.takeLast(10)}';
+  return '"$tail"($len) sel=${v.selection.baseOffset}..${v.selection.extentOffset} '
+      'comp=${v.composing.start}..${v.composing.end}';
 }
 
 mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClient {
   TextInputConnection? _textInputConnection;
   TextEditingValue? __lastKnownRemoteTextEditingValue;
+
+  // updateEditingValue 처리 중임을 나타내는 플래그.
+  // 처리 중에는 _lastKnownRemoteTextEditingValue가 실제 컨트롤러 상태보다
+  // 앞서 있으므로, 중간에 발생하는 updateRemoteValueIfNeeded 호출을 억제한다.
+  // (예: replaceText 내부 notifyListeners → updateRemoteValueIfNeeded가
+  // _updateSelection 실행 전에 sel=old 상태로 spurious send를 일으킬 수 있음)
+  bool _processingIMEEvent = false;
+
+  // 삼성 일본어 IME는 변환 확정 전 composing이 활성 상태인 채로 변환 결과("()")를 먼저 보낸다.
+  // 이후 composing을 해제하며 커서를 괄호 사이({1,1})로 이동하는 이벤트를 별도로 전송한다.
+  // 이 플래그는 "composing active + 텍스트 교체" 처리 후 세워지고,
+  // 다음 정상 처리 이벤트에서 내려진다. 세워진 동안에는 line 261 skip을 억제해
+  // 括弧 사이 커서 이벤트가 정상 처리되도록 한다.
+  bool _conversionPreviewActive = false;
+
+  // iOS 한글 IME는 음절을 다시 조합할 때 마지막 글자들을 지웠다가 되채우는 이벤트를
+  // 여러 번에 나눠 보낸다. (실기기 로그: '…하세욧'(=maxLength) 에서 'ㅏ' 입력 →
+  //  ① del "세욧" → ② ins "세" → ③ ins "요사")
+  // ①②는 길이가 줄어/같아 maxLength 검사를 통과해 문서에 반영되는데 ③이 초과로 거부되면
+  // 초과분뿐 아니라 사용자가 이미 입력해둔 마지막 글자('욧')까지 사라진다.
+  // 그래서 ①의 적용 직전 값을 보관해 두었다가 초과 거부 시 그 값으로 복원한다.
+  // 되채우는 중(②)에도 보관을 유지해야 하며, 원래 길이까지 복구되면 해제한다.
+  // (Android는 조합 교체가 한 이벤트로 오므로 이 경로가 필요 없다)
+  TextEditingValue? _valueBeforeImeDelete;
 
   set _lastKnownRemoteTextEditingValue(TextEditingValue? value) {
     __lastKnownRemoteTextEditingValue = value;
@@ -143,6 +176,31 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
     _textInputConnection!.close();
     _textInputConnection = null;
     _lastKnownRemoteTextEditingValue = null;
+    _valueBeforeImeDelete = null;
+  }
+
+  /// 진행 중인 IME 조합(한글/일본어 자동완성 등)을 즉시 확정하고 조합 상태를 해지한다.
+  ///
+  /// IME 는 조합 중 자기 사본(조합 버퍼)을 들고 있다가, 앱이 문서를 바꾸면 그 사본을
+  /// 다시 주장해 글자가 중복/유실되거나 커서가 어긋난다. 이미지·영상 임베드처럼 앱이
+  /// 문서 길이를 바꾸는 편집 직전에 호출해 조합을 끊어준다.
+  ///
+  /// 현재 텍스트는 그대로 두고 composing 만 비워 돌려주므로(= 요청과 다른 텍스트를 만들지
+  /// 않으므로) iOS 의 교정 동작을 유발하지 않는다. 키보드도 내려가지 않는다.
+  /// (maxLength 초과 처리에서 쓰는 방식과 동일)
+  void clearComposing() {
+    if (!hasConnection) {
+      return;
+    }
+    final value = _lastKnownRemoteTextEditingValue;
+    if (value == null || !value.composing.isValid) {
+      // 조합 중이 아니면 할 일이 없다. (iOS 는 composing 이 항상 무효라 대부분 여기서 끝난다)
+      return;
+    }
+    final confirmed = value.copyWith(composing: TextRange.empty);
+    _lastKnownRemoteTextEditingValue = confirmed;
+    _textInputConnection!.setEditingState(confirmed);
+    _dbg('[IME] clearComposing: $value -> $confirmed');
   }
 
   /// Updates remote value based on current state of [document] and
@@ -152,6 +210,13 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
   /// remote value is up to date or identical.
   void updateRemoteValueIfNeeded() {
     if (!hasConnection) {
+      return;
+    }
+    // updateEditingValue 처리 중(_processingIMEEvent=true)에는 억제한다.
+    // _lastKnownRemoteTextEditingValue가 incoming value로 먼저 업데이트되지만,
+    // 컨트롤러 상태(document/selection)는 replaceText 완료 전이므로 불일치가 생긴다.
+    // 이 시점의 notifyListeners로 인한 spurious send(sel=old 등)를 차단한다.
+    if (_processingIMEEvent) {
       return;
     }
 
@@ -172,6 +237,20 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
       return;
     }
 
+    // During active IME composing, skip cursor-only corrections.
+    // Sending setEditingState with composing=(-1,-1) while Samsung is mid-conversion
+    // cancels its candidate selection. If only the selection changed (text is same),
+    // the IME already knows where its cursor is within the composing range.
+    if (composingRange.isValid &&
+        actualValue.text == _lastKnownRemoteTextEditingValue!.text) {
+      _dbg('[IME] updateRemote suppressed: cursor-only change during composing '
+          '(would send sel=${actualValue.selection.baseOffset})');
+      return;
+    }
+
+    _dbg('[IME] → platform (updateRemote): text="${actualValue.text.replaceAll('\n', '↵')}" '
+        'sel=${actualValue.selection.baseOffset}..${actualValue.selection.extentOffset} '
+        'composing=${actualValue.composing}');
     _lastKnownRemoteTextEditingValue = actualValue;
     _textInputConnection!.setEditingState(
       // Set composing to (-1, -1), otherwise an exception will be thrown if
@@ -194,8 +273,15 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
       return;
     }
 
+    _dbg('[IME] ← platform: text="${value.text.replaceAll('\n', '↵')}" '
+        'composing=${value.composing} sel=${value.selection.baseOffset}..${value.selection.extentOffset} '
+        '| prev: text="${_lastKnownRemoteTextEditingValue?.text.replaceAll('\n', '↵')}" '
+        'composing=${_lastKnownRemoteTextEditingValue?.composing} '
+        'sel=${_lastKnownRemoteTextEditingValue?.selection.baseOffset}..'
+        '${_lastKnownRemoteTextEditingValue?.selection.extentOffset}');
+
     if (_lastKnownRemoteTextEditingValue == value) {
-      // There is no difference between this value and the last known value.
+      _dbg('[IME] ← skip: identical');
       return;
     }
 
@@ -208,9 +294,92 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
       // This check fixes an issue on Android when it sends
       // composing updates separately from regular changes for text and
       // selection.
+      _dbg('[IME] ← skip: composing-only change');
       _lastKnownRemoteTextEditingValue = value;
       return;
     }
+
+    // 텍스트가 같고 이전 상태에서 composing이 활성이었던 경우: IME 내부 cursor 재배치 이벤트.
+    // 일본어/삼성 IME는 candidate 목록 표시 전 cursor를 composing 시작 위치로 이동시키는데,
+    // composing을 해제((-1,-1))하면서 sel만 바꾸는 이벤트도 포함된다.
+    //
+    // 이 이벤트를 Quill selection 변경으로 처리하면:
+    //   1) cursor가 글자 앞으로 이동
+    //   2) notifyListeners → updateRemoteValueIfNeeded가 이전 텍스트("かっこ")로
+    //      spurious setEditingState를 전송 → Samsung이 텍스트 변경으로 인식해 전체 삭제 cascade
+    //
+    // stored는 갱신하지 않는다. 갱신하면 actual.sel ≠ stored.sel 불일치가 생겨
+    // updateRemoteValueIfNeeded가 spurious send를 유발한다.
+    if (_lastKnownRemoteTextEditingValue!.text == value.text &&
+        _lastKnownRemoteTextEditingValue!.composing.isValid &&
+        !_conversionPreviewActive) {
+      _dbg('[IME] ← skip: IME cursor reposition (text same, prev composing active; '
+          'new composing=${value.composing})');
+      return;
+    }
+    _conversionPreviewActive = false;
+
+    // [maxLength] IME(일본어 자동완성 등) 입력을 문서에 반영(diff 적용)하기 전에
+    // 최대 길이를 강제한다.
+    final maxLength = widget.controller.maxLength;
+    if (maxLength > 0 && _exceedsMaxLength(value.text, maxLength)) {
+      // [iOS 분할 이벤트] 직전에 "삭제만" 하는 이벤트가 문서에 반영된 뒤 이어지는 삽입이
+      // 초과로 거부되는 경우, 그 삭제까지 되돌려야 사용자가 입력해둔 마지막 글자가 남는다.
+      // (한글 IME 가 음절 재조합을 삭제/삽입 두 이벤트로 나눠 보내기 때문)
+      final restored = _restoreValueForSplitImeDelete(value, maxLength);
+      if (restored != null) {
+        _dbg('[MAXLEN] 분할 삭제 복원: prev=${_tailOf(_lastKnownRemoteTextEditingValue)} → '
+            'restored=${_tailOf(restored)}');
+        _valueBeforeImeDelete = null;
+        // 삽입은 거부하되, 삭제 이전 값을 플랫폼과 문서 양쪽에 되돌린다.
+        // (문서 복원은 아래 diff 경로가 수행한다)
+        value = restored;
+        if (hasConnection) {
+          _textInputConnection!.setEditingState(value);
+        }
+        widget.controller.onMaxLengthExceeded?.call();
+      } else {
+        // 초과 입력은 문서에 반영하지 않는다.
+        //
+        // 예전 방식은 초과분을 문자열 끝에서 잘랐는데(tail-trim), 커서가 중간에 있을 때
+        // 사용자가 건드리지도 않은 "뒷부분 기존 내용"이 삭제되고, 커서를 끝으로 강제 이동 +
+        // composing 을 비운 뒤 setEditingState 를 재전송하면서 이어지는 getDiff→replaceText
+        // 가 뒤틀린 삭제 범위를 만들어 문서를 손상시켰다.
+        // (디버그는 assert + 앱의 SafeQuillController try/catch 로 연산이 취소돼 손실이
+        //  드러나지 않지만, 릴리즈는 assert 제거로 그 손상이 그대로 적용됨)
+        //
+        // 대신 직전 정상 값(≤maxLength)으로 되돌려 초과분만 거부한다. 문서를 바꾸지 않고
+        // (아래 diff/replaceText 경로에 진입하지 않음) 커서도 직전 위치로 보존되어 desync 가 없다.
+        _dbg('[MAXLEN] 초과 거부: in=${_tailOf(value)} prev=${_tailOf(_lastKnownRemoteTextEditingValue)}');
+        final revertTo = _lastKnownRemoteTextEditingValue;
+        if (revertTo != null && !_exceedsMaxLength(revertTo.text, maxLength)) {
+          // 초과 경계에서 IME 가 초과 후보를 재주장하지 못하도록 composing 을 비워 확정한다.
+          final confirmed = revertTo.copyWith(composing: TextRange.empty);
+          _lastKnownRemoteTextEditingValue = confirmed;
+          if (hasConnection) {
+            _textInputConnection!.setEditingState(confirmed);
+          }
+          widget.controller.onMaxLengthExceeded?.call();
+          return;
+        }
+
+        // 직전 정상 값이 없거나 그 자체가 이미 초과인 예외 상황: 안전하게 tail-trim 으로 폴백.
+        final capped = _capValueToMaxLength(value, maxLength);
+        if (capped != value) {
+          value = capped;
+          if (hasConnection) {
+            _textInputConnection!.setEditingState(value);
+          }
+          widget.controller.onMaxLengthExceeded?.call();
+        }
+      }
+    }
+
+    // 이후 처리에서 _lastKnownRemoteTextEditingValue를 incoming value로 먼저 업데이트하고
+    // replaceText/forceToggledStyle의 notifyListeners가 중간에 updateRemoteValueIfNeeded를
+    // 호출하더라도 spurious send가 발생하지 않도록 플래그를 세운다.
+    _processingIMEEvent = true;
+    try {
 
     final effectiveLastKnownValue = _lastKnownRemoteTextEditingValue!;
     _lastKnownRemoteTextEditingValue = value;
@@ -221,7 +390,24 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
     // getDiff를 통해 변경 범위 계산
     final diff = getDiff(oldText, text, cursorPosition);
 
+    // 이번 이벤트가 "삭제만" 하는 이벤트면 적용 직전 값을 보관한다.
+    // 바로 다음 이벤트가 maxLength 로 거부될 때 이 값으로 되돌린다(iOS 한글 IME 분할 이벤트).
+    // selection-only 이벤트는 삭제/삽입 사이에 끼어들 수 있으므로 보관 값을 유지한다.
+    if (diff.inserted.isEmpty && diff.deleted.isNotEmpty) {
+      // 삭제만 하는 이벤트 = 재조합 버스트의 시작. 이 시점 직전 값을 되돌림 후보로 잡는다.
+      _valueBeforeImeDelete = effectiveLastKnownValue;
+      _dbg('[MAXLEN] 삭제 이전 값 보관=${_tailOf(_valueBeforeImeDelete)} (del="${diff.deleted}")');
+    } else if (_valueBeforeImeDelete != null && diff.inserted.isNotEmpty) {
+      // 삭제 뒤 IME 가 글자를 되채우는 중(버스트 진행)에는 후보를 유지한다.
+      // 원래 길이까지 복구되면 버스트가 정상 종료된 것이므로 후보를 버린다.
+      if (value.text.length >= _valueBeforeImeDelete!.text.length) {
+        _valueBeforeImeDelete = null;
+      } else {
+      }
+    }
+
     if (diff.deleted.isEmpty && diff.inserted.isEmpty) {
+      _dbg('[IME] ← selection-only: sel → ${value.selection.baseOffset}..${value.selection.extentOffset}');
       widget.controller.updateSelection(value.selection, ChangeSource.local);
     } else {
       // Android/iOS IME composing 중 toggledStyle 유실 방지:
@@ -236,6 +422,25 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
           ? effectiveStyle
           : null;
 
+      // 삼성 일본어 IME 등은 かっこ→() 변환 시 커서를 괄호 뒤(offset=2)로 전송한다.
+      // replaceText에 전달하기 전에 커서를 괄호 사이(start+1)로 조정한다.
+      // 별도 updateSelection 호출을 피해 추가적인 notifyListeners 연쇄를 막는다.
+      // 2자 괄호쌍이 단일 이벤트로 삽입된 경우는 항상 사이로 이동하는 것이 올바른 동작이므로
+      // IME가 보낸 커서 위치에 관계없이 적용한다.
+      final effectiveSelection = (diff.inserted.length == 2 &&
+              _isBracketPair(diff.inserted) &&
+              value.selection.isCollapsed)
+          ? TextSelection.collapsed(offset: diff.start + 1)
+          : value.selection;
+
+      if (effectiveSelection != value.selection) {
+        _dbg('[IME] bracket-pair detected "${diff.inserted}": cursor ${value.selection.extentOffset} → ${diff.start + 1}');
+        // _lastKnownRemoteTextEditingValue도 조정된 sel로 갱신해 force-confirm이 올바른 sel을 쓰도록 한다.
+        _lastKnownRemoteTextEditingValue = _lastKnownRemoteTextEditingValue!.copyWith(
+          selection: effectiveSelection,
+        );
+      }
+
       _dbg('[mixin] diff="${diff.deleted}"→"${diff.inserted}" '
           'composing=${value.composing} wasComposing=$wasComposing '
           'pendingInlineStyle=${widget.controller.pendingInlineStyle} '
@@ -246,7 +451,7 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
         diff.start,
         diff.deleted.length,
         diff.inserted,
-        value.selection,
+        effectiveSelection,
       );
 
       if (composingStyle != null) {
@@ -255,7 +460,131 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
         // forceToggledStyle만 호출해 다음 IME 이벤트에서 toggledStyle 상태를 유지한다.
         widget.controller.forceToggledStyle(composingStyle);
       }
+
+      // composing active 상태에서 텍스트 교체(変換プレビュー)가 발생한 경우,
+      // 다음 이벤트에서 커서가 괄호 사이 등 최종 위치로 이동하는 별도 이벤트를 보낸다.
+      // skip 조건(line 268)이 이 이벤트를 억제하지 않도록 플래그를 세운다.
+      if (value.composing.isValid && diff.deleted.isNotEmpty && diff.inserted.isNotEmpty) {
+        _conversionPreviewActive = true;
+      }
+
+      // 삼성 등 일부 IME는 변환 확정 후에도 내부적으로 composing 세션을 유지한다.
+      // 다음 입력 시 변환 전 소스를 기반으로 새 composing을 확장해 오동작을 일으킨다.
+      // setEditingState를 명시적으로 전송해 Android IME의 composing span을 해제한다.
+      //
+      // 아래 두 경우에 force-confirm을 전송한다:
+      //   1. 기존: wasComposing 상태에서 텍스트 교체(かっこ→() 등)
+      //   2. 추가: 括弧쌍 삽입 — wasComposing 없이 후보목록에서 ()를 직접 선택해도
+      //            Samsung은 내부 composing span을 유지해 다음 입력으로 괄호를 교체한다.
+      final isBracketPairInserted =
+          diff.inserted.length == 2 && _isBracketPair(diff.inserted);
+      if (hasConnection &&
+          !value.composing.isValid &&
+          ((wasComposing && diff.deleted.isNotEmpty && diff.inserted.isNotEmpty) ||
+              isBracketPairInserted)) {
+        final confirmedValue = textEditingValue.copyWith(
+          composing: const TextRange(start: -1, end: -1),
+        );
+        _dbg('[IME] → platform (force-confirm): text="${confirmedValue.text.replaceAll('\n', '↵')}" '
+            'sel=${confirmedValue.selection.baseOffset}..${confirmedValue.selection.extentOffset}');
+        _lastKnownRemoteTextEditingValue = confirmedValue;
+        _textInputConnection!.setEditingState(confirmedValue);
+      }
     }
+
+    } finally {
+      _processingIMEEvent = false;
+    }
+  }
+
+  /// iOS 한글 IME 가 음절 재조합을 "삭제 이벤트 → 삽입 이벤트" 로 나눠 보낼 때,
+  /// 삽입이 [maxLength] 로 거부되면 앞선 삭제까지 되돌려야 할 값을 반환한다.
+  /// 되돌릴 필요/근거가 없으면 null.
+  ///
+  /// 예) '하네욧'(=maxLength) 에서 'ㅏ' 입력
+  ///   ① '욧' 삭제 → '하네'         (길이가 줄어 그대로 반영됨)
+  ///   ② '요샤' 삽입 → 초과로 거부   ← 여기서 ① 을 되돌리지 않으면 '욧' 까지 사라진다
+  ///
+  /// 조건:
+  /// - iOS (Android 는 조합 교체가 한 이벤트로 와서 이 상황 자체가 없다)
+  /// - 직전 이벤트가 "삭제만" 이었고, 그 삭제 이전 값이 [maxLength] 이내
+  /// - 이번 삽입이 그 삭제 지점에서 일어남(= 삭제 지점 앞 텍스트가 그대로)
+  ///
+  /// 사용자가 직접 백스페이스로 지운 뒤 한 글자를 친 경우는 초과가 될 수 없으므로
+  /// (삭제로 한도보다 짧아진 뒤 한 글자 삽입 = 한도 이내) 이 경로를 타지 않는다.
+  TextEditingValue? _restoreValueForSplitImeDelete(TextEditingValue incoming, int maxLength) {
+    if (defaultTargetPlatform != TargetPlatform.iOS) return null;
+
+    final beforeDelete = _valueBeforeImeDelete;
+    final afterDelete = _lastKnownRemoteTextEditingValue;
+    if (beforeDelete == null || afterDelete == null) {
+      return null;
+    }
+    if (beforeDelete.text.length <= afterDelete.text.length) {
+      return null;
+    }
+    if (_exceedsMaxLength(beforeDelete.text, maxLength)) {
+      return null;
+    }
+
+    // 삭제가 일어난 지점(= 삭제 후 커서) 기준으로, 그 앞부분이 그대로여야 같은 조합의 연속이다.
+    final deletedAt = afterDelete.selection.baseOffset;
+    if (deletedAt < 0 || !afterDelete.selection.isCollapsed) {
+      return null;
+    }
+    if (deletedAt > afterDelete.text.length || deletedAt > incoming.text.length) {
+      return null;
+    }
+    if (incoming.text.substring(0, deletedAt) != afterDelete.text.substring(0, deletedAt)) {
+      return null;
+    }
+
+    // 삭제 직전 값의 selection 은 IME 가 잡아둔 marked range(예: 98..100)일 수 있으므로
+    // 되돌릴 때는 그 끝으로 커서를 모아 준다.
+    final selection = beforeDelete.selection.isCollapsed
+        ? beforeDelete.selection
+        : TextSelection.collapsed(offset: beforeDelete.selection.end);
+    // IME 가 거부된 후보를 다시 주장하지 못하도록 composing 은 비워 확정한다.
+    return beforeDelete.copyWith(selection: selection, composing: TextRange.empty);
+  }
+
+  /// [text] 의 grapheme 수(이모지 안전, '\n' 제외)가 [maxLength] 를 초과하면 true.
+  bool _exceedsMaxLength(String text, int maxLength) {
+    var count = 0;
+    for (final gc in text.characters) {
+      if (gc == '\n') continue;
+      count++;
+      if (count > maxLength) return true;
+    }
+    return false;
+  }
+
+  /// [value] 의 텍스트를 grapheme(이모지 안전) 기준 [maxLength] 까지 자른 새 값을
+  /// 반환한다. '\n' 은 길이에서 제외한다. 한도 이내이면 [value] 를 그대로 반환한다.
+  /// 잘린 경우 커서를 끝으로 두고 composing 을 비운다.
+  /// (직전 정상 값이 없는 예외 상황의 폴백 전용)
+  TextEditingValue _capValueToMaxLength(TextEditingValue value, int maxLength) {
+    final text = value.text;
+    var count = 0;
+    var cutIndex = text.length;
+    var pos = 0;
+    for (final gc in text.characters) {
+      if (gc != '\n') {
+        if (count >= maxLength) {
+          cutIndex = pos;
+          break;
+        }
+        count++;
+      }
+      pos += gc.length;
+    }
+    if (cutIndex >= text.length) return value; // 한도 이내
+    final newText = text.substring(0, cutIndex);
+    return TextEditingValue(
+      text: newText,
+      selection: TextSelection.collapsed(offset: newText.length),
+      composing: TextRange.empty,
+    );
   }
 
   @override
@@ -373,6 +702,15 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
   }
 
   @override
+  bool onFocusReceived() {
+    if (mounted && !widget.config.focusNode.hasFocus && widget.config.focusNode.canRequestFocus) {
+      widget.config.focusNode.requestFocus();
+      return true;
+    }
+    return false;
+  }
+
+  @override
   void connectionClosed() {
     if (!hasConnection) {
       return;
@@ -395,4 +733,15 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
       SchedulerBinding.instance.addPostFrameCallback((_) => _updateSizeAndTransform());
     }
   }
+
+  static const Map<String, String> _bracketPairs = {
+    '(': ')', '[': ']', '{': '}',
+    '（': '）', '「': '」', '『': '』',
+    '【': '】', '《': '》', '〈': '〉',
+    '〔': '〕', '［': '］', '｛': '｝',
+    '｢': '｣', // halfwidth corner brackets (Samsung IME sends these for かぎかっこ)
+  };
+
+  static bool _isBracketPair(String s) =>
+      s.length == 2 && _bracketPairs[s[0]] == s[1];
 }

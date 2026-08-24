@@ -853,7 +853,10 @@ class QuillRawEditorState extends EditorState
       });
     }
 
-    controller.addListener(_didChangeTextEditingValueListener);
+    controller
+      ..addListener(_didChangeTextEditingValueListener)
+      // 컨트롤러의 clearComposing() 이 이 에디터의 IME 연결에 닿도록 연결한다.
+      ..clearComposingHandler = clearComposing;
 
     if (!widget.config.readOnly) {
       // listen to composing range changes
@@ -967,6 +970,10 @@ class QuillRawEditorState extends EditorState
     _selectionOverlay?.dispose();
     _selectionOverlay = null;
     controller.removeListener(_didChangeTextEditingValueListener);
+    // 다른 에디터가 이미 등록했을 수 있으므로 내 것일 때만 해제한다.
+    if (controller.clearComposingHandler == clearComposing) {
+      controller.clearComposingHandler = null;
+    }
     if (!widget.config.readOnly) {
       widget.config.focusNode.removeListener(_handleFocusChanged);
       composingRange.removeListener(_onComposingRangeChanged);
