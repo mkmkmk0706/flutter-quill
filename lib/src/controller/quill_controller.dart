@@ -132,6 +132,10 @@ class QuillController extends ChangeNotifier {
   /// 이벤트에서도 toggledStyle을 복원하는 데 사용된다.
   Style? _pendingInlineStyle;
 
+  /// 지금 처리 중인 selection 변경이 **사용자發**(탭 등)인지.
+  /// replaceText 가 자기 편집 결과로 부르는 내부 갱신과 구분한다.
+  bool _selectionChangeFromUser = false;
+
   /// [_pendingInlineStyle] 이 세워진 캐럿 위치.
   /// 캐럿이 다른 자리로 옮겨가면 그 서식 의도는 의미를 잃으므로 복원하지 않는다.
   int? _pendingInlineStyleOffset;
@@ -416,6 +420,24 @@ class QuillController extends ChangeNotifier {
 
   void toggleInlineStyle(int index, Style selectionStyle) {
     forceImeStyle(index, selectionStyle);
+  }
+
+  /// [data] 가 문서에 넣는 글자 수.
+  ///
+  /// 붙여넣기는 data 가 [Delta] 라 길이를 1 로 세면 실제 캐럿 위치와 어긋난다.
+  /// 그러면 _pendingInlineStyleOffset 이 틀어져 "캐럿이 떠났다" 로 판정되고,
+  /// 붙여넣기 전에 켜둔 서식이 붙여넣은 뒤 사라진다. (iOS 에서만 드러남 — Android 는
+  /// 위치 기준 검사를 하지 않는다)
+  int _insertedLengthOf(Object? data) {
+    if (data is String) return data.length;
+    if (data is Delta) {
+      var length = 0;
+      for (final op in data.toList()) {
+        if (op.isInsert) length += op.length ?? 0;
+      }
+      return length;
+    }
+    return 1;
   }
 
   Style? getCachedStyle(int index) {
@@ -736,8 +758,7 @@ class QuillController extends ChangeNotifier {
     // 이후 _updateSelection에서 toggledStyle을 올바르게 복원한다.
     if ((data is! String || data != '\n') && effectiveActiveStyle.isNotEmpty) {
       _pendingInlineStyle = effectiveActiveStyle;
-      _pendingInlineStyleOffset =
-          index + (data is String ? data.length : 1) - len;
+      _pendingInlineStyleOffset = index + _insertedLengthOf(data) - len;
     }
 
     if (textSelection != null) {
@@ -983,7 +1004,12 @@ class QuillController extends ChangeNotifier {
         toggledStyle = const Style();
       }
     }
-    _updateSelection(textSelection);
+    _selectionChangeFromUser = true;
+    try {
+      _updateSelection(textSelection);
+    } finally {
+      _selectionChangeFromUser = false;
+    }
     notifyListeners();
   }
 
@@ -1099,7 +1125,12 @@ class QuillController extends ChangeNotifier {
         // 글자 중간에 입력할 때 캐럿이 문장 끝으로 튀었다. (실기기 로그로 확인)
         // 여기는 원래도 toggledStyle 을 쓰던 자리라 알림이 늘지 않는다.
         // Android 는 예전 그대로(무조건 복원). 위 updateSelection 가드가 캐럿 이동을 맡는다.
-        final atPendingOffset = defaultTargetPlatform != TargetPlatform.iOS ||
+        // ★ 사용자發 selection 변경일 때만 위치를 따진다.
+        // replaceText 가 자기 편집 결과로 부르는 내부 갱신(타이핑·붙여넣기)까지 검사하면,
+        // 삽입으로 캐럿이 이동한 것을 "사용자가 옮겼다" 로 오인해 서식 의도를 버린다.
+        // (붙여넣기 후 켜둔 서식이 iOS 에서만 사라지던 증상)
+        final atPendingOffset = !_selectionChangeFromUser ||
+            defaultTargetPlatform != TargetPlatform.iOS ||
             _pendingInlineStyleOffset == null ||
             _pendingInlineStyleOffset == selection.baseOffset;
         if (!atPendingOffset) {

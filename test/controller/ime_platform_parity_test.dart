@@ -9,6 +9,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_quill/flutter_quill.dart';
+import 'package:flutter_quill/quill_delta.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 TextSelection _sel(int o) => TextSelection.collapsed(offset: o);
@@ -52,6 +53,17 @@ class IosDriver extends ImeDriver {
     c.replaceText(i, 1, '', _sel(i));
     c.replaceText(i, 0, full, _sel(i + 1));
   }
+}
+
+/// quill_controller_rich_paste._pasteDelta 와 동일한 호출 형태.
+/// 캐럿을 **삽입 전** selection.end 로 넘기고 getPositionDelta 가 보정한다.
+void pasteDelta(QuillController c, Delta delta) {
+  c.replaceText(
+    c.selection.start,
+    c.selection.end - c.selection.start,
+    delta,
+    TextSelection.collapsed(offset: c.selection.end),
+  );
 }
 
 void main() {
@@ -129,6 +141,30 @@ void main() {
       d.typeSyllable(c, 'ㄹ', '라');
       c.updateSelection(_sel(2), ChangeSource.local); // 나|다 경계
       d.typeSyllable(c, 'ㅅ', '사');
+    });
+
+    parity('P6: 서식 켠 상태에서 붙여넣고 이어서 입력', (c, d) {
+      d.typeSyllable(c, 'ㄱ', '가');
+      button(c, Attribute.bold);
+      // 외부 붙여넣기 (평문 Delta)
+      // 실제 붙여넣기와 동일한 호출 (quill_controller_rich_paste._pasteDelta)
+      pasteDelta(c, Delta()..insert('XYZ'));
+      // 붙여넣기 뒤 이어서 입력 → 켜둔 서식이 살아 있어야 한다
+      d.typeSyllable(c, 'ㄴ', '나');
+    });
+
+    // P7: 실제 붙여넣기 제스처를 흉내낸다.
+    // 길게 눌러 붙여넣기 메뉴를 띄우면 캐럿/선택이 한 번 갱신된다(= updateSelection 발생).
+    // 그 뒤 붙여넣고 이어서 입력했을 때 켜둔 서식이 살아 있어야 한다.
+    parity('P7: 붙여넣기 제스처(선택 이벤트) 후 붙여넣고 이어서 입력', (c, d) {
+      d.typeSyllable(c, 'ㄱ', '가');
+      button(c, Attribute.bold);
+      final i = c.selection.baseOffset;
+      // 길게 누르기 → 캐럿 재설정 (같은 자리로 오는 경우와 다른 자리로 오는 경우 모두)
+      c.updateSelection(_sel(i), ChangeSource.local);
+      c.updateSelection(_sel(i), ChangeSource.local);
+      pasteDelta(c, Delta()..insert('XYZ'));
+      d.typeSyllable(c, 'ㄴ', '나');
     });
   });
 }
