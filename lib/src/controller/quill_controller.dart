@@ -596,7 +596,14 @@ class QuillController extends ChangeNotifier {
 
       // indexStyle != null 만으로는 Style{}(서식 없음)도 shouldRetainDelta를 유발한다.
       // 서식 없는 글자에 대해 retain을 적용해도 no-op이므로 isNotEmpty를 추가 확인한다.
+      // ★ 붙여넣기(data is Delta)는 제외한다.
+      // 붙여넣는 내용은 자기 서식을 이미 갖고 있는데, 아래 retain 루프는
+      // `number = data is String ? data.length : 1` 이라 Delta 를 "1글자"로 세어
+      // **붙여넣은 첫 글자에만** 현재 toggledStyle 을 찍어버린다.
+      // (Bold 를 켜둔 채 평문을 붙여넣으면 첫 글자만 굵어지던 증상)
+      // 임베드 삽입(Embeddable)은 기존 동작을 유지한다.
       var shouldRetainDelta =
+          data is! Delta &&
           (effectiveActiveStyle.isNotEmpty ||
               (indexStyle != null && indexStyle.isNotEmpty)) &&
           delta.isNotEmpty &&
