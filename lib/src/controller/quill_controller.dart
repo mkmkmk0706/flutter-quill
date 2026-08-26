@@ -28,6 +28,8 @@ import 'quill_controller_config.dart';
 
 
 
+
+
 void _dbg(String msg) {
   if (kDebugMode) log(msg);
 }
@@ -129,6 +131,10 @@ class QuillController extends ChangeNotifier {
   /// _preserveToggledStyleOnNextSelection 이 소비된 이후의 추가 selection
   /// 이벤트에서도 toggledStyle을 복원하는 데 사용된다.
   Style? _pendingInlineStyle;
+
+  /// [_pendingInlineStyle] 이 세워진 캐럿 위치.
+  /// 캐럿이 다른 자리로 옮겨가면 그 서식 의도는 의미를 잃으므로 복원하지 않는다.
+  int? _pendingInlineStyleOffset;
 
   /// IME composing 중 mixin이 안정적으로 참조할 수 있도록 공개한다.
   /// toggledStyle은 selection 이벤트로 초기화될 수 있으므로, 이 값을 사용한다.
@@ -730,6 +736,8 @@ class QuillController extends ChangeNotifier {
     // 이후 _updateSelection에서 toggledStyle을 올바르게 복원한다.
     if ((data is! String || data != '\n') && effectiveActiveStyle.isNotEmpty) {
       _pendingInlineStyle = effectiveActiveStyle;
+      _pendingInlineStyleOffset =
+          index + (data is String ? data.length : 1) - len;
     }
 
     if (textSelection != null) {
@@ -782,9 +790,20 @@ class QuillController extends ChangeNotifier {
       if (pending != null) {
         final merged = Map<String, Attribute>.from(syncStyle.attributes);
         for (final attr in pending.values) {
-          if (attr.value == null &&
-              attr.scope != AttributeScope.block &&
-              !merged.containsKey(attr.key)) {
+          // 서식 끄기 의도(value == null)는 **문맥을 덮는다.**
+          // 끄기는 캐시·문서에 "키가 아예 없는" 상태로만 남으므로 여기서 실어주지 않으면
+          // 삽입 시 앞 글자의 서식을 그대로 상속한다. 게다가 문맥(지워진 글자)이 그 서식을
+          // 켜고 있으면 예전 조건(!merged.containsKey)에 막혀 **끈 서식이 도로 켜졌다.**
+          // (실기기 로그: 사용자가 bold/italic/underline 을 모두 껐는데 동기화 결과가 전부 true)
+          //
+          // 반대로 켜기 의도(value != null)는 싣지 않는다. _pendingInlineStyle 은 타이핑으로도
+          // 갱신되어 stale 일 수 있고, 그걸 실으면 서식 구간을 백스페이스로 지나 평문까지
+          // 지운 뒤 입력해도 이전 서식이 붙는다. 사용자가 방금 켠 서식은 앱이 서식 버튼 직후
+          // forceImeStyle 로 캐럿에 심어둔 캐시가 전달한다.
+          if (attr.scope == AttributeScope.block) continue;
+          if (attr.value == null) {
+            merged[attr.key] = attr;
+          } else if (!merged.containsKey(attr.key)) {
             merged[attr.key] = attr;
           }
         }
@@ -796,6 +815,7 @@ class QuillController extends ChangeNotifier {
       // 그러면 서식 구간을 백스페이스로 지나 평문까지 지운 뒤 입력해도 이전 서식이 붙는다.
       // (실기기 로그: savedStyle[3]={} 인데 동기화 결과가 {bold:true})
       _pendingInlineStyle = syncStyle.isNotEmpty ? syncStyle : null;
+      _pendingInlineStyleOffset = syncStyle.isNotEmpty ? index : null;
       _dbg('[replaceText] iOS delete sync toggledStyle:$toggledStyle');
     }
 
@@ -867,6 +887,7 @@ class QuillController extends ChangeNotifier {
       _preserveToggledStyleOnNextSelection = true;
       // 여러 번의 selection 이벤트에서도 서식이 유지되도록 별도로 저장한다.
       _pendingInlineStyle = toggledStyle;
+      _pendingInlineStyleOffset = index;
       // 사용자가 새 서식을 설정했으므로 forceImeStyle이 남긴 stale 캐시를 비운다.
       // formatText → afterButtonPressed → forceImeStyle 순서이므로, 이 clear 이후
       // forceImeStyle이 최신 getSelectionStyle()로 재설정한다.
@@ -926,33 +947,41 @@ class QuillController extends ChangeNotifier {
   }
 
   void updateSelection(TextSelection textSelection, ChangeSource source) {
-    // 캐럿이 실제로 다른 자리로 옮겨가면 "다음 글자에 적용할 서식"(toggledStyle /
-    // _pendingInlineStyle)은 의미를 잃는다. 그런데 _updateSelection 은 selection 이벤트마다
-    // _pendingInlineStyle 을 toggledStyle 로 되살리므로, 서식 끄기 의도({bold:null})가 남아 있으면
-    // getSelectionStyle 의 mergeAll 이 **문서에 실제로 있는 서식까지 지워버린다.**
-    // 그 결과 서식 글자에 커서를 둬도 툴바 버튼이 꺼진 채로 표시됐다.
-    // (한 번이라도 서식을 끄면 그 뒤로 계속 재현)
+    // 캐럿을 다른 자리에 놓으면 위치 캐시(_styleCacheByIndex)는 의미를 잃는다.
     //
-    // 그래서 캐럿이 진짜로 움직였을 때만 비운다. 건드리지 않는 것들:
-    // - 입력 중 서식 유지는 replaceText → _updateSelection(private) 경로라 여기 안 온다.
-    // - IME 조합 중 커서 재배치 이벤트는 mixin 이 이 메서드에 닿기 전에 걸러낸다.
-    // - 같은 자리로 오는 이벤트(Android 재포커스)는 위치가 같아 보존된다.
-    // - 서식 버튼 직후 1회는 _preserveToggledStyleOnNextSelection 이 잡고 있으므로 건너뛴다.
+    // 이 캐시는 "IME 가 지웠다 다시 넣는 글자의 원래 서식"을 위치로 기억하는 장치다.
+    // 그런데 글 중간에 글자를 끼워 넣으면 뒤 글자들이 밀리는데 캐시는 **밀리기 전 위치**의
+    // 서식을 그대로 들고 있어, 새로 친 글자가 원래 그 자리에 있던 글자의 서식을 물려받는다.
+    // (실기기 로그: 평문 자리에 입력했는데 char[2]/char[3] 이 cached={bold:true} 로 굵어짐)
     //
-    // ★ 접힌(collapsed) 선택으로 바뀔 때만 본다.
-    // iOS 한글 IME 는 글자를 이어 넣지 않고, 입력마다 **단어 전체를 선택(예: 0..1)해서
-    // 지우고 통째로 다시 넣는다.** 그 범위 선택은 사용자가 캐럿을 옮긴 게 아니라 IME 가
-    // 교체할 구간을 잡은 것이므로, 여기서 서식 의도를 지우면 "가" 입력 → Bold → "나" 입력에서
-    // bold 가 통째로 날아간다. (실기기 로그로 확인)
-    // 사용자가 탭해서 캐럿을 놓는 경우는 항상 collapsed 라 이 조건으로 갈린다.
-    final caretMoved = textSelection.isCollapsed &&
-        (textSelection.baseOffset != _selection.baseOffset ||
-            textSelection.extentOffset != _selection.extentOffset);
-    if (caretMoved &&
-        !_preserveToggledStyleOnNextSelection &&
-        _pendingInlineStyle != null) {
-      _pendingInlineStyle = null;
-      toggledStyle = const Style();
+    // 캐럿 이동은 새 입력 맥락의 시작이므로 여기서 버린다.
+    // toggledStyle 등 알림을 유발하는 상태는 건드리지 않는다. (iOS selection 폭주 회피)
+    final caretJumped = textSelection.isCollapsed &&
+        textSelection.baseOffset != _selection.baseOffset;
+    if (caretJumped) {
+      _styleCacheByIndex.clear();
+      _imePreservedStyles.clear();
+      _forceImeStyleIndex = null;
+    }
+    // 캐럿을 다른 자리에 놓으면 "다음 글자에 적용할 서식" 의도는 의미를 잃는다.
+    // 비우지 않으면 서식 끄기 의도({bold:null})가 남아, getSelectionStyle 의 mergeAll 이
+    // 문서에 실제로 있는 서식까지 지워 툴바 버튼이 꺼진 채로 표시된다.
+    //
+    // ★ iOS 는 제외한다. iOS 에서 여기서 상태를 바꾸면
+    //   notify → updateRemote → IME 가 selection 을 되쏘는 폭주가 일어나
+    //   글자 중간에 입력할 때 캐럿이 문장 끝으로 튄다. (실기기 로그로 확인)
+    //   iOS 는 아래 _updateSelection 안에서 위치 기준으로 처리한다.
+    if (defaultTargetPlatform != TargetPlatform.iOS) {
+      final caretMoved = textSelection.isCollapsed &&
+          (textSelection.baseOffset != _selection.baseOffset ||
+              textSelection.extentOffset != _selection.extentOffset);
+      if (caretMoved &&
+          !_preserveToggledStyleOnNextSelection &&
+          _pendingInlineStyle != null) {
+        _pendingInlineStyle = null;
+        _pendingInlineStyleOffset = null;
+        toggledStyle = const Style();
+      }
     }
     _updateSelection(textSelection);
     notifyListeners();
@@ -1059,9 +1088,40 @@ class QuillController extends ChangeNotifier {
         _dbg('[replaceText] updateSelection preserve:$toggledStyle');
       } else {
         // Android에서 포커스 이벤트가 여러 번 올 때 _pendingInlineStyle로 복원한다.
-        toggledStyle = _pendingInlineStyle ?? const Style();
+        //
+        // ★ 단, 캐럿이 **그 의도가 세워진 자리에 그대로 있을 때만** 복원한다.
+        // 예전에는 위치를 안 보고 항상 복원해서, 서식 끄기 의도({bold:null})가 영영 남았다.
+        // 그러면 getSelectionStyle 의 mergeAll 이 문서에 실제로 있는 서식까지 지워
+        // 서식 글자에 커서를 둬도 툴바 버튼이 꺼진 채로 표시됐다.
+        //
+        // updateSelection(public)에서 상태를 바꾸는 방식은 쓰지 않는다. 그렇게 하면
+        // iOS 에서 notify → updateRemote → IME 가 되쏘는 selection 폭주가 생겨
+        // 글자 중간에 입력할 때 캐럿이 문장 끝으로 튀었다. (실기기 로그로 확인)
+        // 여기는 원래도 toggledStyle 을 쓰던 자리라 알림이 늘지 않는다.
+        // Android 는 예전 그대로(무조건 복원). 위 updateSelection 가드가 캐럿 이동을 맡는다.
+        final atPendingOffset = defaultTargetPlatform != TargetPlatform.iOS ||
+            _pendingInlineStyleOffset == null ||
+            _pendingInlineStyleOffset == selection.baseOffset;
+        if (!atPendingOffset) {
+          // 캐럿이 그 의도가 세워진 자리를 떠났다. _onlyInlineToggledStyleStyle 이
+          // toggledStyle 이 비면 _pendingInlineStyle 로 폴백하므로 여기서 정리해야
+          // 옮긴 자리의 입력에 이전 서식이 따라붙지 않는다.
+          //
+          // 단, **끄기 의도(value == null)는 남긴다.** 끄기는 문서·캐시에 흔적이 없어
+          // 여기서 잃으면 앞 글자의 서식을 그대로 상속해버린다. (T3: 배경색 OFF 후 입력)
+          final offIntent = <String, Attribute>{
+            for (final a in _pendingInlineStyle?.values ?? const <Attribute>[])
+              if (a.value == null) a.key: a,
+          };
+          _pendingInlineStyle =
+              offIntent.isNotEmpty ? Style.attr(offIntent) : null;
+          _pendingInlineStyleOffset = null;
+        }
+        toggledStyle =
+            atPendingOffset ? (_pendingInlineStyle ?? const Style()) : const Style();
         _dbg(
-          '[replaceText] updateSelection 2:$toggledStyle [!] $insertNewline, ${selection.start}',
+          '[replaceText] updateSelection 2:$toggledStyle [!] $insertNewline, '
+          '${selection.start} (pendingOffset=$_pendingInlineStyleOffset atPending=$atPendingOffset)',
         );
       }
     } else {

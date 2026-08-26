@@ -91,22 +91,22 @@ void main() {
     c.dispose();
   });
 
-  // AOS-4: 범위 선택은 가드 대상이 아니다 — iOS 수정으로 좁힌 부분의 AOS 영향 확인.
-  // 범위 선택(드래그, IME 의 교체 범위 잡기)은 서식 의도를 지우지 않고,
-  // 사용자가 캐럿을 놓는 접힌 선택에서만 정리된다.
-  test('AOS-4: 범위 선택은 서식 의도를 지우지 않고, 캐럿을 놓을 때만 정리된다', () {
+  // AOS-4: 캐럿을 옮기면 그 서식 의도는 **복원되지 않는다.**
+  // (_pendingInlineStyle 을 지우는 게 아니라, 다른 자리에서는 toggledStyle 로 되살리지 않는다.
+  //  updateSelection 에서 상태를 바꾸면 iOS 에서 selection 폭주가 생겨 그 방식은 쓰지 않는다)
+  test('AOS-4: 캐럿을 옮기면 서식 의도가 복원되지 않는다', () {
     final c = QuillController.basic();
     c.replaceText(0, 0, 'abc', sel(3));
     c.formatText(3, 0, Attribute.bold);
-    expect(c.pendingInlineStyle, isNotNull, reason: '전제: 서식 버튼으로 의도가 세워진다');
+    expect(c.toggledStyle.attributes.containsKey('bold'), isTrue,
+        reason: '전제: 서식 버튼으로 의도가 세워진다');
 
-    c.updateSelection(range(0, 2), ChangeSource.local); // 드래그 선택
-    expect(c.pendingInlineStyle, isNotNull,
-        reason: '범위 선택은 캐럿 이동이 아니므로 의도를 지우면 안 된다');
+    c.updateSelection(sel(3), ChangeSource.local); // 같은 자리 → 유지
+    expect(toolbar(c), isTrue, reason: '같은 자리에서는 의도가 유지돼야 한다');
 
-    c.updateSelection(sel(1), ChangeSource.local); // 사용자가 캐럿을 놓음
-    expect(c.pendingInlineStyle, isNull,
-        reason: '접힌 선택으로 캐럿을 옮기면 의도가 정리되어야 한다');
+    c.updateSelection(sel(1), ChangeSource.local); // 다른 자리 → 복원 안 함
+    expect(toolbar(c), isFalse,
+        reason: '캐럿을 옮겼는데 이전 서식 의도가 툴바에 남았다');
     c.dispose();
   });
 

@@ -241,7 +241,21 @@ mixin RawEditorStateTextInputClientMixin on EditorState implements TextInputClie
     // Sending setEditingState with composing=(-1,-1) while Samsung is mid-conversion
     // cancels its candidate selection. If only the selection changed (text is same),
     // the IME already knows where its cursor is within the composing range.
+    //
+    // ★ 단, 커서가 **조합 범위 밖**으로 나갔으면 보내야 한다.
+    // 사용자가 다른 곳을 탭해 캐럿을 옮긴 경우다. 이때도 삼키면 IME 는 캐럿이 옮겨진 걸
+    // 모른 채 원래 자리에서 계속 조합해서, 다음 글자가 **옮긴 자리가 아니라 조합 자리에**
+    // 들어간다. (실기기 로그: 캐럿을 2 로 옮겼는데 composing 이 3..4 라 입력이 3 으로 감)
+    // 그 자리가 서식 구간이면 서식까지 따라붙어 "커서가 튕기고 굵게 나오는" 증상이 된다.
+    // 조합 범위 안에서의 이동은 IME 자신의 커서 관리이므로 예전대로 무시한다.
+    final sel = actualValue.selection;
+    final caretLeftComposing = sel.isValid &&
+        sel.isCollapsed &&
+        (sel.baseOffset < composingRange.start ||
+            sel.baseOffset > composingRange.end);
+
     if (composingRange.isValid &&
+        !caretLeftComposing &&
         actualValue.text == _lastKnownRemoteTextEditingValue!.text) {
       _dbg('[IME] updateRemote suppressed: cursor-only change during composing '
           '(would send sel=${actualValue.selection.baseOffset})');
