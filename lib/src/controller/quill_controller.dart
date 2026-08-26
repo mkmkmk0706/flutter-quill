@@ -136,9 +136,16 @@ class QuillController extends ChangeNotifier {
   void forceToggledStyle(Style style) {
     toggledStyle = style;
     // _updateSelection이 나중에 toggledStyle을 리셋하더라도 _pendingInlineStyle로 복원되도록 함께 갱신한다.
-    if (style.isNotEmpty) {
-      _pendingInlineStyle = style;
-    }
+    //
+    // ★ 빈 Style(서식 없음)이 오면 _pendingInlineStyle 도 비운다.
+    // 백스페이스 액션(QuillEditorDeleteTextAction)은 삭제 후 문맥 서식을 이 메서드로 알려주는데,
+    // 평문 구간까지 지우면 빈 Style 이 온다. 그때 pending 을 남겨두면
+    // _onlyInlineToggledStyleStyle 의 폴백과 _updateSelection 의 복원이 예전 서식을 되살려,
+    // 평문 자리에 입력한 글자에 지워진 서식이 다시 붙는다.
+    //
+    // 주의: "서식 끄기" 의도는 {bold:null} 처럼 값이 null 인 *속성이 있는* 스타일이라
+    // isNotEmpty 이다. 따라서 이 분기는 OFF 의도 보존(T1/T3/T11/T12)을 건드리지 않는다.
+    _pendingInlineStyle = style.isNotEmpty ? style : null;
     _dbg('[replaceText] forceToggledStyle:$toggledStyle');
     notifyListeners();
   }
@@ -513,6 +520,11 @@ class QuillController extends ChangeNotifier {
     Style? iosDeletedStyle;
 
     if (isDeleteOnly) {
+      // 삭제로 문서가 줄면 삭제 지점보다 뒤의 캐시 항목은 이미 사라진 글자를 가리킨다.
+      // 그대로 두면 나중에 그 위치에 입력한 글자가 죽은 글자의 서식을 물려받는다.
+      // (백스페이스를 여러 번 누른 뒤 재입력하면 지운 글자들의 서식이 위치별로 되살아나던 증상)
+      // 조합 재삽입에 필요한 index..index+len-1 은 바로 아래 cacheStyle 이 다시 채운다.
+      _styleCacheByIndex.removeWhere((k, _) => k > index + len - 1);
       cacheStyle(index, len);
       // iOS 는 IME composing 이 무효라 mixin 의 forceToggledStyle 동기화(Android 경로)가
       // 일어나지 않는다. 그러면 캐시(삭제된 글자의 문맥 서식)와 toggledStyle(사용자가 켠 서식)이
