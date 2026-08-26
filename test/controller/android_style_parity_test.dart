@@ -109,4 +109,53 @@ void main() {
         reason: '접힌 선택으로 캐럿을 옮기면 의도가 정리되어야 한다');
     c.dispose();
   });
+
+  // AOS-5/6: iOS 전용 분기(iosDeletedStyle 동기화)를 고친 것이 Android 에 영향이 없는지.
+  // 그 블록은 defaultTargetPlatform == iOS 일 때만 iosDeletedStyle 이 세팅되어
+  // `if (iosDeletedStyle != null)` 안으로 들어가므로 Android 는 구조적으로 진입하지 않는다.
+  // iOS 테스트(ios_multi_attribute_test.dart)와 같은 시나리오를 Android 로 고정해 확인한다.
+  test('AOS-5: Bold OFF 후 Italic+Underline 켜고 입력 → 둘 다 적용', () {
+    final c = QuillController.basic();
+    void button(Attribute a) {
+      c.formatText(c.selection.start, 0, a);
+      c.toggleInlineStyle(c.selection.start, c.getSelectionStyle());
+    }
+
+    button(Attribute.bold);
+    c.replaceText(0, 0, '한', sel(1));
+    button(Attribute.clone(Attribute.bold, null));
+    c.replaceText(1, 0, '글', sel(2));
+
+    button(Attribute.italic);
+    button(Attribute.underline);
+    c.replaceText(2, 0, '테', sel(3));
+
+    expect(c.document.collectStyle(2, 1).attributes['italic']?.value, true);
+    expect(c.document.collectStyle(2, 1).attributes['underline']?.value, true);
+    expect(c.document.collectStyle(2, 1).attributes['bold']?.value, isNull);
+    c.dispose();
+  });
+
+  test('AOS-6: bold+italic+underline 에서 bold 만 끄면 bold 만 빠진다', () {
+    final c = QuillController.basic();
+    void button(Attribute a) {
+      c.formatText(c.selection.start, 0, a);
+      c.toggleInlineStyle(c.selection.start, c.getSelectionStyle());
+    }
+
+    button(Attribute.bold);
+    button(Attribute.italic);
+    button(Attribute.underline);
+    c.replaceText(0, 0, '가', sel(1));
+    c.replaceText(1, 0, '나', sel(2));
+
+    button(Attribute.clone(Attribute.bold, null));
+    c.replaceText(2, 0, '다', sel(3));
+
+    expect(c.document.collectStyle(2, 1).attributes['bold']?.value, isNull,
+        reason: 'bold 를 껐는데 계속 굵게 나온다');
+    expect(c.document.collectStyle(2, 1).attributes['italic']?.value, true);
+    expect(c.document.collectStyle(2, 1).attributes['underline']?.value, true);
+    c.dispose();
+  });
 }

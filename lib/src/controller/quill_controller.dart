@@ -26,6 +26,8 @@ import 'clipboard/quill_controller_paste.dart';
 import 'clipboard/quill_controller_rich_paste.dart';
 import 'quill_controller_config.dart';
 
+
+
 void _dbg(String msg) {
   if (kDebugMode) log(msg);
 }
@@ -485,8 +487,13 @@ class QuillController extends ChangeNotifier {
   }
 
   /// 버튼 클릭 후 호출: 현재 커서 위치에 사용자가 원하는 스타일을 캐시에 미리 저장한다.
+  /// [forceImeStyle] 이 마지막으로 심은 캐시 위치.
+  /// 삭제 시 스테일 캐시를 정리할 때 이 항목만은 지우지 않는다. (아래 설명)
+  int? _forceImeStyleIndex;
+
   void forceImeStyle(int index, Style selectionStyle) {
     _styleCacheByIndex[index] = selectionStyle;
+    _forceImeStyleIndex = index;
     _dbg('[replaceText] forceImeStyle index:[$index] style=$selectionStyle');
   }
 
@@ -524,7 +531,14 @@ class QuillController extends ChangeNotifier {
       // 그대로 두면 나중에 그 위치에 입력한 글자가 죽은 글자의 서식을 물려받는다.
       // (백스페이스를 여러 번 누른 뒤 재입력하면 지운 글자들의 서식이 위치별로 되살아나던 증상)
       // 조합 재삽입에 필요한 index..index+len-1 은 바로 아래 cacheStyle 이 다시 채운다.
-      _styleCacheByIndex.removeWhere((k, _) => k > index + len - 1);
+      // ★ forceImeStyle 이 심은 위치는 지우지 않는다.
+      // 앱은 서식 버튼 직후 toggleInlineStyle(=forceImeStyle) 로 **캐럿 위치**에 사용자가 고른
+      // 서식을 심는다. 그런데 iOS 한글 IME 는 캐럿 앞쪽 단어를 통째로 지우므로, 그 삭제의
+      // "뒤쪽 정리"가 캐럿에 심어둔 서식까지 날려버렸다.
+      // (실기기 로그: forceImeStyle index:[6] 인데 삭제는 retain[4] Delete[2] → k>5 로 6이 제거됨)
+      _styleCacheByIndex.removeWhere(
+        (k, _) => k > index + len - 1 && k != _forceImeStyleIndex,
+      );
       cacheStyle(index, len);
       // iOS 는 IME composing 이 무효라 mixin 의 forceToggledStyle 동기화(Android 경로)가
       // 일어나지 않는다. 그러면 캐시(삭제된 글자의 문맥 서식)와 toggledStyle(사용자가 켠 서식)이
@@ -594,6 +608,21 @@ class QuillController extends ChangeNotifier {
       // 순수 삽입: [retain, insert] 또는 [insert]
       final isPureInsert = delta.length <= 2 && delta.last.isInsert;
 
+      final number = data is String ? data.length : 1;
+
+      // ★ 삽입 범위 **전체** 에 캐시가 있는지 본다. (예전엔 index 한 곳만 봤다)
+      // iOS 한글 IME 는 단어를 통째로 다시 넣으므로 한 번의 insert 가 여러 글자다.
+      // 앞 글자에 캐시가 없고 뒤 글자에만 있으면(서식 버튼이 캐럿에 심어둔 경우) 예전 조건은
+      // retain 자체를 건너뛰어, 심어둔 서식이 적용되지 않았다.
+      var hasCachedInRange = false;
+      for (var i = 0; i < number; i++) {
+        final st = getCachedStyle(index + i);
+        if (st != null && st.isNotEmpty) {
+          hasCachedInRange = true;
+          break;
+        }
+      }
+
       // indexStyle != null 만으로는 Style{}(서식 없음)도 shouldRetainDelta를 유발한다.
       // 서식 없는 글자에 대해 retain을 적용해도 no-op이므로 isNotEmpty를 추가 확인한다.
       // ★ 붙여넣기(data is Delta)는 제외한다.
@@ -604,8 +633,7 @@ class QuillController extends ChangeNotifier {
       // 임베드 삽입(Embeddable)은 기존 동작을 유지한다.
       var shouldRetainDelta =
           data is! Delta &&
-          (effectiveActiveStyle.isNotEmpty ||
-              (indexStyle != null && indexStyle.isNotEmpty)) &&
+          (effectiveActiveStyle.isNotEmpty || hasCachedInRange) &&
           delta.isNotEmpty &&
           (isPureInsert || isImeCompose);
       final isEnd =
@@ -622,8 +650,6 @@ class QuillController extends ChangeNotifier {
           shouldRetainDelta = false;
         }
       }
-
-      final number = data is String ? data.length : 1;
 
       if (shouldRetainDelta) {
         final retainDelta = Delta()..retain(index);
@@ -680,6 +706,7 @@ class QuillController extends ChangeNotifier {
         for (var i = 0; i < number; i++) {
           _styleCacheByIndex.remove(index + i);
           _imePreservedStyles.remove(index + i);
+          if (_forceImeStyleIndex == index + i) _forceImeStyleIndex = null;
         }
       }
       // isImeCompose 변환 후 스테일 캐시 정리:
@@ -734,10 +761,22 @@ class QuillController extends ChangeNotifier {
     // _updateSelection 이 toggledStyle 을 리셋한 뒤여야 하므로 여기서 처리한다.
     // _pendingInlineStyle 도 함께 갱신해야 이후 selection 이벤트에서 복원된다.
     if (iosDeletedStyle != null) {
-      // 서식 OFF 의도(null 값 속성)는 캐시/문서에 남지 않는다. 문서에는 "키가 아예 없는"
+      // 문맥(iosDeletedStyle)은 **바탕**이고, _pendingInlineStyle(사용자 의도)이 **덮는다.**
+      //
+      // 값이 null 인 속성(서식 끄기 의도)은 캐시·문서에 남지 않는다. 문서에는 "키가 아예 없는"
       // 상태로만 저장되고, 그 상태로 삽입하면 앞 글자의 서식을 상속해버린다.
-      // 따라서 캐시로 덮기 전에 기존 _pendingInlineStyle 의 null 속성을 되살려 OFF 를 유지한다.
-      // (배경색을 없앤 뒤 입력하면 이전 배경색이 다시 붙던 증상)
+      // 그래서 여기서 실어줘야 한다. (배경색을 없앤 뒤 입력하면 이전 배경색이 다시 붙던 증상)
+      //
+      // ★ 예전에는 "값이 null 이고 문맥에 없는 키" 만 실었는데, 그러면 양방향이 다 깨진다.
+      // iOS 한글 IME 는 입력마다 단어 전체를 지웠다 다시 넣으므로 "서식 버튼을 누른 직후" 의
+      // 삭제가 이 경로를 탄다. 그때 지워진 글자의 서식(문맥)이 사용자 의도를 이기면
+      // 방금 누른 버튼이 무시된다. 실기기 로그로 두 방향 모두 확인했다.
+      //   켜기: 버튼 후 {bold:null, italic:true, underline:true} → 동기화 후 {bold:null}
+      //         (막 켠 italic/underline 이 value != null 이라 실리지 않아 서식이 안 먹음)
+      //   끄기: 버튼 후 {bold:null, ...} → 동기화 후 {bold:true, ...}
+      //         (지워진 글자가 bold 라 문맥에 키가 있어 bold:null 이 차단됨 → 해제 안 됨)
+      //
+      // Android 는 iosDeletedStyle 이 항상 null 이라 이 블록에 진입하지 않는다.
       var syncStyle = iosDeletedStyle;
       final pending = _pendingInlineStyle;
       if (pending != null) {
@@ -752,9 +791,11 @@ class QuillController extends ChangeNotifier {
         syncStyle = Style.attr(merged);
       }
       toggledStyle = syncStyle;
-      if (syncStyle.isNotEmpty) {
-        _pendingInlineStyle = syncStyle;
-      }
+      // ★ 문맥에 서식이 없으면 _pendingInlineStyle 도 비운다.
+      // 예전에는 비어 있으면 갱신을 건너뛰어, 타이핑으로 남은 stale 값이 그대로 살아있었다.
+      // 그러면 서식 구간을 백스페이스로 지나 평문까지 지운 뒤 입력해도 이전 서식이 붙는다.
+      // (실기기 로그: savedStyle[3]={} 인데 동기화 결과가 {bold:true})
+      _pendingInlineStyle = syncStyle.isNotEmpty ? syncStyle : null;
       _dbg('[replaceText] iOS delete sync toggledStyle:$toggledStyle');
     }
 
