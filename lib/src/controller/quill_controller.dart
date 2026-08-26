@@ -878,6 +878,34 @@ class QuillController extends ChangeNotifier {
   }
 
   void updateSelection(TextSelection textSelection, ChangeSource source) {
+    // 캐럿이 실제로 다른 자리로 옮겨가면 "다음 글자에 적용할 서식"(toggledStyle /
+    // _pendingInlineStyle)은 의미를 잃는다. 그런데 _updateSelection 은 selection 이벤트마다
+    // _pendingInlineStyle 을 toggledStyle 로 되살리므로, 서식 끄기 의도({bold:null})가 남아 있으면
+    // getSelectionStyle 의 mergeAll 이 **문서에 실제로 있는 서식까지 지워버린다.**
+    // 그 결과 서식 글자에 커서를 둬도 툴바 버튼이 꺼진 채로 표시됐다.
+    // (한 번이라도 서식을 끄면 그 뒤로 계속 재현)
+    //
+    // 그래서 캐럿이 진짜로 움직였을 때만 비운다. 건드리지 않는 것들:
+    // - 입력 중 서식 유지는 replaceText → _updateSelection(private) 경로라 여기 안 온다.
+    // - IME 조합 중 커서 재배치 이벤트는 mixin 이 이 메서드에 닿기 전에 걸러낸다.
+    // - 같은 자리로 오는 이벤트(Android 재포커스)는 위치가 같아 보존된다.
+    // - 서식 버튼 직후 1회는 _preserveToggledStyleOnNextSelection 이 잡고 있으므로 건너뛴다.
+    //
+    // ★ 접힌(collapsed) 선택으로 바뀔 때만 본다.
+    // iOS 한글 IME 는 글자를 이어 넣지 않고, 입력마다 **단어 전체를 선택(예: 0..1)해서
+    // 지우고 통째로 다시 넣는다.** 그 범위 선택은 사용자가 캐럿을 옮긴 게 아니라 IME 가
+    // 교체할 구간을 잡은 것이므로, 여기서 서식 의도를 지우면 "가" 입력 → Bold → "나" 입력에서
+    // bold 가 통째로 날아간다. (실기기 로그로 확인)
+    // 사용자가 탭해서 캐럿을 놓는 경우는 항상 collapsed 라 이 조건으로 갈린다.
+    final caretMoved = textSelection.isCollapsed &&
+        (textSelection.baseOffset != _selection.baseOffset ||
+            textSelection.extentOffset != _selection.extentOffset);
+    if (caretMoved &&
+        !_preserveToggledStyleOnNextSelection &&
+        _pendingInlineStyle != null) {
+      _pendingInlineStyle = null;
+      toggledStyle = const Style();
+    }
     _updateSelection(textSelection);
     notifyListeners();
   }
