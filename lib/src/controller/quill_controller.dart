@@ -130,7 +130,24 @@ class QuillController extends ChangeNotifier {
   /// 리셋되어도 첫 번째 글자에 올바른 서식이 유지되도록 하는 백업 스타일.
   /// _preserveToggledStyleOnNextSelection 이 소비된 이후의 추가 selection
   /// 이벤트에서도 toggledStyle을 복원하는 데 사용된다.
-  Style? _pendingInlineStyle;
+  Style? _pendingInlineStyleValue;
+
+  Style? get _pendingInlineStyle => _pendingInlineStyleValue;
+
+  /// 새 서식 의도가 세워지면 "이월된 끄기 의도" 표식은 자동으로 풀린다.
+  /// (대입 지점이 여러 곳이라 setter 로 모아 빠뜨리지 않게 한다)
+  set _pendingInlineStyle(Style? value) {
+    _pendingInlineStyleValue = value;
+    _offIntentCarried = false;
+  }
+
+  /// 현재 [_pendingInlineStyle] 이 **캐럿이 자리를 떠나며 남긴 끄기 의도**인지.
+  ///
+  /// 이 잔재는 "옮긴 자리에서 입력할 때 앞 글자 서식을 상속하지 않게" 하려고 남기는 값이라
+  /// **입력에만 쓰고 표시에는 쓰면 안 된다.** toggledStyle 에 실으면
+  /// getSelectionStyle() 의 mergeAll 이 문서에 실제로 있는 서식까지 지워
+  /// 캐럿을 서식 글자에 놓아도 툴바가 꺼진 채로 표시된다.
+  bool _offIntentCarried = false;
 
   /// 지금 처리 중인 selection 변경이 **사용자發**(탭 등)인지.
   /// replaceText 가 자기 편집 결과로 부르는 내부 갱신과 구분한다.
@@ -1104,6 +1121,18 @@ class QuillController extends ChangeNotifier {
         _pendingInlineStyle = pendingMap.isNotEmpty
             ? Style.attr(pendingMap)
             : null;
+        // ★ toggledStyle 에도 같은 "끄기 의도"를 남긴다.
+        // 위 mergeAll 이 null-값 attr 을 지워버려 toggledStyle 만 빈 Style 이 되면,
+        // getSelectionStyle() = 문서서식.mergeAll(toggledStyle) 이 지울 게 없어
+        // **엔터 직전에 끈 서식이 문서 문맥 그대로 툴바에 켜진 채로 표시된다.**
+        // (재현: bold ON → "abc" → bold OFF → 엔터 → 툴바만 bold 가 다시 켜짐.
+        //  실제 입력은 OFF 로 나가므로 표시와 결과가 어긋난다.)
+        //
+        // 삽입 경로는 toggledStyle 이 비면 _pendingInlineStyle 로 폴백하는
+        // _onlyInlineToggledStyleStyle() 를 쓰므로, 여기서 같은 값을 넣어도 결과가 같다.
+        // 다른 분기(else)도 이미 toggledStyle = _pendingInlineStyle 로 맞추고 있어
+        // 엔터 분기만 예외였던 것을 통일하는 셈이다.
+        toggledStyle = _pendingInlineStyle ?? const Style();
         _preserveToggledStyleOnNextSelection = false;
         _dbg(
           '[replaceText] updateSelection 1:$toggledStyle [insertNewline && selection.start > 0] $insertNewline, ${selection.start}',
@@ -1147,9 +1176,20 @@ class QuillController extends ChangeNotifier {
           _pendingInlineStyle =
               offIntent.isNotEmpty ? Style.attr(offIntent) : null;
           _pendingInlineStyleOffset = null;
+          // 위 setter 가 풀어놓은 표식을 여기서만 다시 세운다. (이월된 끄기 의도)
+          _offIntentCarried = offIntent.isNotEmpty;
         }
-        toggledStyle =
-            atPendingOffset ? (_pendingInlineStyle ?? const Style()) : const Style();
+        // ★ 이월된 끄기 의도(_offIntentCarried)는 toggledStyle 에 싣지 않는다.
+        // 예전에는 실었는데, 위에서 _pendingInlineStyleOffset 을 null 로 비우므로
+        // 이후 **모든** selection 이벤트가 atPendingOffset=true 로 판정되어
+        // 끄기 의도가 무한히 복원됐다. 그러면 getSelectionStyle() 이 문서에 실제로 있는
+        // 서식까지 지워 **캐럿을 어디에 놓아도 툴바가 전부 꺼진 채로 표시된다.**
+        // (iOS 전용 — Android 는 updateSelection(public) 이 캐럿 이동 시 의도를 비운다)
+        // 입력 경로는 _onlyInlineToggledStyleStyle() 가 _pendingInlineStyle 로 폴백하므로
+        // 끄기 의도 자체는 그대로 유효하다. (T3: 배경색 OFF 후 입력)
+        toggledStyle = (atPendingOffset && !_offIntentCarried)
+            ? (_pendingInlineStyle ?? const Style())
+            : const Style();
         _dbg(
           '[replaceText] updateSelection 2:$toggledStyle [!] $insertNewline, '
           '${selection.start} (pendingOffset=$_pendingInlineStyleOffset atPending=$atPendingOffset)',
